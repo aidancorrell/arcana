@@ -1,3 +1,4 @@
+pub mod client;
 pub mod cost;
 pub mod profiler;
 pub mod schema_sync;
@@ -5,6 +6,7 @@ pub mod usage;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::adapter::{MetadataAdapter, SyncOutput};
 
@@ -25,11 +27,19 @@ pub struct SnowflakeConfig {
 /// Snowflake metadata adapter.
 pub struct SnowflakeAdapter {
     config: SnowflakeConfig,
+    data_source_id: Uuid,
 }
 
 impl SnowflakeAdapter {
-    pub fn new(config: SnowflakeConfig) -> Self {
-        Self { config }
+    pub fn new(config: SnowflakeConfig, data_source_id: Uuid) -> Self {
+        Self {
+            config,
+            data_source_id,
+        }
+    }
+
+    pub fn config(&self) -> &SnowflakeConfig {
+        &self.config
     }
 }
 
@@ -40,12 +50,13 @@ impl MetadataAdapter for SnowflakeAdapter {
     }
 
     async fn sync(&self) -> Result<SyncOutput> {
-        let output = schema_sync::sync_schemas(&self.config).await?;
+        let output =
+            schema_sync::sync_schemas(&self.config, self.data_source_id).await?;
         Ok(output)
     }
 
     async fn health_check(&self) -> Result<()> {
-        // TODO: execute `SELECT CURRENT_TIMESTAMP()` via Snowflake HTTP API
-        todo!("implement Snowflake health check")
+        let mut client = client::SnowflakeClient::new(self.config.clone());
+        client.health_check().await
     }
 }
