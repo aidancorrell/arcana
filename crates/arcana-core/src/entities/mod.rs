@@ -7,9 +7,9 @@ pub mod table;
 pub mod usage;
 
 pub use column::{Column, ColumnProfile};
-pub use contract::{ContractType, DataContract};
+pub use contract::{ContractEntityType, ContractResult, ContractStatus, ContractType, DataContract};
 pub use document::{Document, DocumentChunk, DocumentSourceType, EntityLink, LinkedEntityType, LinkMethod};
-pub use lineage::LineageEdge;
+pub use lineage::{LineageEdge, LineageNodeType, LineageSource};
 pub use semantic::{DefinitionSource, Metric, MetricType, SemanticDefinition, SemanticEntityType};
 pub use table::{DataSource, DataSourceType, Schema, Table, TableType};
-pub use usage::{AgentInteraction, UsageRecord};
+pub use usage::{AgentInteraction, QueryType, UsageRecord};
