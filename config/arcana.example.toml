@@ -1,0 +1,53 @@
+# Arcana Configuration Example
+# Copy this to arcana.toml and fill in your values.
+# arcana.toml is gitignored — never commit secrets.
+
+[database]
+# SQLite database path (default: ./arcana.db)
+url = "sqlite://arcana.db"
+
+[embeddings]
+# Embedding provider: "openai" | "local"
+provider = "openai"
+openai_api_key = "sk-..."
+openai_model = "text-embedding-3-small"
+# Dimensionality must match the model
+dimensions = 1536
+
+[snowflake]
+account = "myorg-myaccount"
+warehouse = "COMPUTE_WH"
+database = "ANALYTICS"
+schema = "PUBLIC"
+user = "arcana_user"
+# Use private key auth (recommended) or password
+private_key_path = "~/.ssh/snowflake_rsa.pem"
+# password = "..."
+role = "ARCANA_ROLE"
+
+[dbt]
+# Path to your dbt project root
+project_path = "./dbt"
+# Path to manifest.json (defaults to <project_path>/target/manifest.json)
+manifest_path = "./dbt/target/manifest.json"
+# Path to catalog.json (defaults to <project_path>/target/catalog.json)
+catalog_path = "./dbt/target/catalog.json"
+
+[confidence]
+# How quickly confidence decays per day (0.0–1.0)
+# 0.02 = ~50 days to halve from 1.0 to 0.5
+decay_rate_per_day = 0.02
+# Minimum confidence before a metric is flagged as stale
+stale_threshold = 0.4
+
+[mcp]
+# MCP server bind address
+bind_addr = "127.0.0.1:3000"
+# Max tokens to include in a single context response
+max_context_tokens = 8000
+
+[ingest]
+# Supported document sources
+sources = ["markdown"]
+# Glob patterns for markdown ingest
+markdown_globs = ["docs/**/*.md", "wiki/**/*.md"]
