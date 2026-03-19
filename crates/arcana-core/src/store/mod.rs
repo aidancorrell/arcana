@@ -59,6 +59,7 @@ pub trait MetadataStore: Send + Sync {
     // --- Usage ---
     async fn insert_usage_record(&self, record: &UsageRecord) -> Result<()>;
     async fn insert_agent_interaction(&self, interaction: &AgentInteraction) -> Result<()>;
+    async fn update_interaction_feedback(&self, id: Uuid, was_helpful: bool) -> Result<()>;
 }
 
 pub use sqlite::SqliteStore;

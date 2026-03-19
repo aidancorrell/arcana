@@ -1,9 +1,11 @@
 use anyhow::Result;
 use arcana_core::{
+    confidence::ConfidenceDecay,
     embeddings::{EmbeddingProvider, VectorIndex},
     entities::{Column, DocumentChunk, SemanticDefinition, Table},
     store::MetadataStore,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -85,6 +87,8 @@ impl RelevanceRanker {
 
     /// Rank context items for a given request.
     pub async fn rank(&self, request: &ContextRequest) -> Result<ContextResult> {
+        let decay = ConfidenceDecay::default();
+
         // 1. Embed the query
         let query_embedding = self.embedding_provider.embed(&request.query).await?;
 
@@ -98,14 +102,112 @@ impl RelevanceRanker {
             .chunk_index
             .search(&query_embedding, request.top_k)?;
 
-        // 4. Merge, deduplicate, and re-rank by combined score
-        // TODO: fetch entity metadata for each hit from the store,
-        //       apply confidence decay, and compute combined relevance score.
-        let _ = (entity_hits, chunk_hits);
+        // 4. For each hit: fetch entity, apply confidence decay, compute combined score
+        let mut items: Vec<ContextItem> = Vec::new();
+
+        for (entity_id, similarity) in &entity_hits {
+            let similarity_f64 = *similarity as f64;
+
+            // Try as a table first
+            if let Some(table) = self.store.get_table(*entity_id).await? {
+                if let Some(filter_id) = request.filter_table_id {
+                    if table.id != filter_id {
+                        continue;
+                    }
+                }
+
+                let decayed = decay.decayed_score(table.confidence, table.confidence_refreshed_at);
+                let score = Self::combined_score(similarity_f64, decayed.value());
+
+                if score < request.min_confidence {
+                    continue;
+                }
+
+                let definitions = self.store.get_semantic_definitions(table.id).await?;
+                let content = definitions
+                    .first()
+                    .map(|d| d.definition.clone())
+                    .or_else(|| table.description.clone())
+                    .unwrap_or_default();
+
+                items.push(ContextItem {
+                    entity_id: table.id,
+                    entity_type: ContextEntityType::Table,
+                    relevance_score: score,
+                    confidence: decayed.value(),
+                    label: table.name.clone(),
+                    content,
+                });
+                continue;
+            }
+
+            // Not a table — check for semantic definitions (could be column or metric)
+            let definitions = self.store.get_semantic_definitions(*entity_id).await?;
+            if let Some(best_def) = definitions.first() {
+                let decayed =
+                    decay.decayed_score(best_def.confidence, best_def.confidence_refreshed_at);
+                let score = Self::combined_score(similarity_f64, decayed.value());
+
+                if score < request.min_confidence {
+                    continue;
+                }
+
+                use arcana_core::entities::SemanticEntityType;
+                let entity_type = match best_def.entity_type {
+                    SemanticEntityType::Table => ContextEntityType::Table,
+                    SemanticEntityType::Column => ContextEntityType::Column,
+                    SemanticEntityType::Metric => ContextEntityType::SemanticDefinition,
+                };
+
+                items.push(ContextItem {
+                    entity_id: *entity_id,
+                    entity_type,
+                    relevance_score: score,
+                    confidence: decayed.value(),
+                    label: best_def
+                        .definition
+                        .chars()
+                        .take(80)
+                        .collect::<String>(),
+                    content: best_def.definition.clone(),
+                });
+            }
+        }
+
+        // Process chunk hits
+        for (chunk_id, similarity) in &chunk_hits {
+            let score = *similarity as f64;
+            if score < request.min_confidence {
+                continue;
+            }
+
+            items.push(ContextItem {
+                entity_id: *chunk_id,
+                entity_type: ContextEntityType::DocumentChunk,
+                relevance_score: score,
+                confidence: score,
+                label: format!("doc-chunk:{}", &chunk_id.to_string()[..8]),
+                content: String::new(),
+            });
+        }
+
+        // 5. Deduplicate by entity_id (keep highest score), sort descending, truncate
+        items.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut seen = HashSet::new();
+        items.retain(|item| seen.insert(item.entity_id));
+
+        items.truncate(request.top_k);
+
+        let estimated_tokens = items.iter().map(|i| i.content.len() / 4 + 20).sum();
 
         Ok(ContextResult {
-            items: vec![],
-            estimated_tokens: 0,
+            items,
+            estimated_tokens,
         })
     }
 

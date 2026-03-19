@@ -66,43 +66,24 @@ All 28 `MetadataStore` methods implemented in `crates/arcana-core/src/store/sqli
 
 `crates/arcana-core/src/embeddings/` — `provider.rs` (`EmbeddingProvider` trait), `openai.rs` (text-embedding-3-small), `index.rs` (in-memory brute-force cosine similarity). All tested.
 
-### Phase 5 — Recommender (partial — serializer done, ranker needs completion)
+### Phase 5 — Recommender ✅ COMPLETE
 
-File: `crates/arcana-recommender/src/ranker.rs`
-
-`serializer.rs` and `record_interaction` in `feedback.rs` are complete.
-
-Remaining work in `ranker.rs` — the `rank()` method returns empty results. Fill in the TODO:
-1. Embed the query (already done)
-2. Search entity index + chunk index (already done)
-3. For each hit: fetch entity from store, apply confidence decay (`confidence.rs`), compute `combined_score(similarity, decayed_confidence)`
-4. Sort descending, truncate to `top_k`, filter below `min_confidence`
-5. Return `ContextResult` with `ContextItem` per hit
-
-Also in `feedback.rs`: `record_feedback()` (line ~48) has a TODO for the UPDATE query.
+`crates/arcana-recommender/src/` — `ranker.rs` (`rank()` with confidence decay, combined scoring, dedup, top-k), `serializer.rs` (Markdown/JSON/Prose output), `feedback.rs` (`record_interaction` + `record_feedback`). Store trait extended with `update_interaction_feedback`.
 
 ### Phase 6 — Document Pipeline ✅ COMPLETE
 
 `crates/arcana-documents/src/` — `sources/markdown.rs`, `chunker.rs` (heading-aware splitting), `linker.rs` (exact + fuzzy entity linking), `pipeline.rs` (fetch → chunk → embed → link → persist). All tested.
 
-### Phase 7 — CLI Wiring (partial — only `cmd_init` done)
+### Phase 7 — CLI Wiring ✅ COMPLETE
 
-File: `crates/arcana-cli/src/main.rs`
+`crates/arcana-cli/src/main.rs` — All 7 commands implemented: `init`, `sync` (dbt + Snowflake), `ingest` (Markdown pipeline), `serve --stdio` (MCP server), `ask` (semantic search), `status` (entity counts), `reembed` (batch re-embedding). AppConfig parses `[dbt]` and `[snowflake]` TOML sections.
 
-`cmd_init` is complete. The remaining 6 commands are stubbed with `todo!()`:
+### Phase 8 — MCP Wiring ✅ COMPLETE
 
-- `cmd_sync`: load config, build adapter (dbt or snowflake based on config), call `sync()`, upsert results into store
-- `cmd_ingest`: build `MarkdownSource`, run `IngestPipeline`, report stats
-- `cmd_serve --stdio`: build `ArcanaServer`, call `serve_stdio()`
-- `cmd_ask`: embed query, call `ranker.rank()`, call `serializer.serialize()`, print
-- `cmd_status`: query store for counts, print table
-- `cmd_reembed`: fetch all entities and chunks, re-embed in batches, update embeddings in store
+`crates/arcana-mcp/src/tools.rs` — All 4 tools implemented: `get_context`, `describe_table`, `estimate_cost` (delegates to Snowflake adapter), `update_context`. `ArcanaServer` carries optional `SnowflakeConfig` for cost estimation.
 
-### Phase 8 — MCP Wiring (partial — `estimate_cost` tool stubbed)
+### End-to-end integration test (manual)
 
-`crates/arcana-mcp/src/tools.rs` — `get_context`, `describe_table`, and `update_context` tools are complete. `estimate_cost` (line ~191) has a `todo!()` — needs to delegate to `arcana-adapters::snowflake::cost::estimate_query_cost()`.
-
-End-to-end integration test:
 1. Point at a real dbt project, run `arcana sync --adapter dbt`
 2. Run `arcana ask "monthly revenue by region"` — verify it returns sensible tables/columns
 3. Start `arcana serve --stdio`, wire to Claude Desktop

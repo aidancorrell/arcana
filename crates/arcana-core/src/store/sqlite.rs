@@ -951,6 +951,15 @@ impl MetadataStore for SqliteStore {
         .await?;
         Ok(())
     }
+
+    async fn update_interaction_feedback(&self, id: Uuid, was_helpful: bool) -> Result<()> {
+        sqlx::query("UPDATE agent_interactions SET was_helpful = ? WHERE id = ?")
+            .bind(was_helpful)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
