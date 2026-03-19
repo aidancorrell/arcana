@@ -24,6 +24,7 @@ pub struct ArcanaServer {
     store: Arc<dyn MetadataStore>,
     ranker: Arc<RelevanceRanker>,
     serializer: Arc<ContextSerializer>,
+    snowflake_config: Option<Arc<arcana_adapters::snowflake::SnowflakeConfig>>,
 }
 
 impl ArcanaServer {
@@ -32,7 +33,15 @@ impl ArcanaServer {
         ranker: Arc<RelevanceRanker>,
         serializer: Arc<ContextSerializer>,
     ) -> Self {
-        Self { store, ranker, serializer }
+        Self { store, ranker, serializer, snowflake_config: None }
+    }
+
+    pub fn with_snowflake_config(
+        mut self,
+        config: arcana_adapters::snowflake::SnowflakeConfig,
+    ) -> Self {
+        self.snowflake_config = Some(Arc::new(config));
+        self
     }
 
     /// Start the MCP server on stdio (for Claude Desktop / Cursor integration).
@@ -164,6 +173,7 @@ impl ServerHandler for ArcanaServer {
         let store = self.store.clone();
         let ranker = self.ranker.clone();
         let serializer = self.serializer.clone();
+        let snowflake_config = self.snowflake_config.clone();
 
         async move {
             let result: anyhow::Result<String> = match request.name.as_ref() {
@@ -193,7 +203,7 @@ impl ServerHandler for ArcanaServer {
                             request.arguments.unwrap_or_default(),
                         ))
                         .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
-                    handle_estimate_cost(input)
+                    handle_estimate_cost(input, snowflake_config)
                         .await
                         .map(|o| serde_json::to_string_pretty(&o).unwrap_or_default())
                 }
