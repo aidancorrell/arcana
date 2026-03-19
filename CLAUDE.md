@@ -50,115 +50,59 @@ Out of scope for MVP:
 
 Work in this order. Each phase produces something runnable.
 
-### Phase 1 — SQLite Store (unblock everything else)
+### Phase 1 — SQLite Store ✅ COMPLETE
 
-All store methods in `crates/arcana-core/src/store/sqlite.rs` are `todo!()`. Implement them top to bottom. The migration schema (`0001_initial.sql`) is already correct — just write the queries.
+All 28 `MetadataStore` methods implemented in `crates/arcana-core/src/store/sqlite.rs`. Runtime `sqlx::query()` + `.bind()` throughout. Integration tests cover roundtrip for all entity types.
 
-Priority order (most depended-on first):
-1. `upsert_data_source` / `get_data_source` / `list_data_sources`
-2. `upsert_schema` / `list_schemas`
-3. `upsert_table` / `get_table` / `list_tables` / `search_tables` (use FTS5 virtual table)
-4. `upsert_column` / `list_columns`
-5. `upsert_semantic_definition` / `get_semantic_definitions`
-6. `upsert_column_profile`
-7. `upsert_metric` / `list_metrics`
-8. `upsert_document` / `get_document` / `upsert_chunk` / `list_chunks` / `upsert_entity_link`
-9. `insert_usage_record` / `insert_agent_interaction`
-10. `upsert_contract` / `list_contracts`
-11. `upsert_lineage_edge` / `get_upstream` / `get_downstream`
+### Phase 2 — dbt Adapter ✅ COMPLETE
 
-All rows use TEXT UUIDs and TEXT ISO-8601 timestamps (matching the migration). Use `sqlx::query()` (runtime, not `query!` compile-time macros) and `.bind()` chains as established in the existing `upsert_data_source` / `upsert_schema` / `upsert_table` implementations.
+`crates/arcana-adapters/src/dbt/` — `manifest.rs` (model/source/column/lineage extraction), `catalog.rs` (row counts, column types), `semantic.rs` (MetricFlow metrics), `mod.rs` (`DbtAdapter` implementing `MetadataAdapter` trait). All tested.
 
-### Phase 2 — dbt Adapter
+### Phase 3 — Snowflake Adapter ✅ COMPLETE
 
-File: `crates/arcana-adapters/src/dbt/`
+`crates/arcana-adapters/src/snowflake/` — `schema_sync.rs`, `cost.rs` (EXPLAIN-based estimation), `profiler.rs` (column stats), `usage.rs` (query history), `client.rs` (SQL API v2 auth + execution). All tested.
 
-Implement `manifest.rs` first — it's the richest source:
-- Parse `manifest.json` into `Table`, `Column`, and `SemanticDefinition` entities
-- Key paths: `manifest.nodes`, `manifest.sources`, `manifest.metrics`, `manifest.semantic_models`
-- Column descriptions from `nodes[*].columns[*].description` → `SemanticDefinition` with `source = AdapterSync { adapter_type: "dbt" }`, confidence 0.80
-- Model descriptions from `nodes[*].description` → `SemanticDefinition` on the table
+### Phase 4 — Embedding Index ✅ COMPLETE
 
-Then `catalog.rs`:
-- Parse `catalog.json` for column types and row counts (supplements manifest)
+`crates/arcana-core/src/embeddings/` — `provider.rs` (`EmbeddingProvider` trait), `openai.rs` (text-embedding-3-small), `index.rs` (in-memory brute-force cosine similarity). All tested.
 
-Then `semantic.rs`:
-- Parse MetricFlow YAML / `manifest.metrics` for `Metric` entities
-
-Wire up the dbt adapter to `MetadataAdapter` trait in `adapter.rs`. Implement `list_schemas`, `list_tables`, `list_columns`, `sync_descriptions`.
-
-### Phase 3 — Snowflake Adapter
-
-File: `crates/arcana-adapters/src/snowflake/`
-
-Uses Snowflake SQL API (REST, no JDBC needed). Auth via `SNOWFLAKE_USER` / `SNOWFLAKE_PASSWORD` env vars + account identifier.
-
-Order:
-1. `schema_sync.rs` — implement `list_schemas` (query `INFORMATION_SCHEMA.SCHEMATA`), `list_tables` (query `INFORMATION_SCHEMA.TABLES`), `list_columns` (query `INFORMATION_SCHEMA.COLUMNS`)
-2. `cost.rs` — implement `estimate_cost` using `EXPLAIN` statement, parse bytes scanned, estimate credits at $2.50/TB
-3. `profiler.rs` — implement column profiling: `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `MIN`, `MAX` per column, batch into single multi-stat query
-4. `usage.rs` — query `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` for table access patterns
-
-For the SQL API, POST to `https://{account}.snowflakecomputing.com/api/v2/statements` with a JWT token. Use `reqwest` (already in workspace deps).
-
-### Phase 4 — Embedding Index
-
-File: `crates/arcana-core/src/embeddings/`
-
-Implement `provider.rs` (`EmbeddingProvider` trait) and `openai.rs` (OpenAI `text-embedding-3-small`).
-
-For `index.rs` (`VectorIndex`): start with an in-memory brute-force cosine similarity search over a `Vec<(Uuid, Vec<f32>)>`. This is fast enough for MVP (< 10k entities). Replace with `usearch` later.
-
-The index needs:
-- `insert(id: Uuid, embedding: Vec<f32>)` — add or update a vector
-- `search(query: &[f32], top_k: usize) -> Vec<(Uuid, f32)>` — return (id, similarity) pairs
-
-After each `upsert_semantic_definition` / `upsert_chunk`, the pipeline should call `index.insert(entity_id, embedding)`.
-
-### Phase 5 — Recommender
+### Phase 5 — Recommender (partial — serializer done, ranker needs completion)
 
 File: `crates/arcana-recommender/src/ranker.rs`
 
-The `rank()` stub is mostly wired. Fill in the TODO:
+`serializer.rs` and `record_interaction` in `feedback.rs` are complete.
+
+Remaining work in `ranker.rs` — the `rank()` method returns empty results. Fill in the TODO:
 1. Embed the query (already done)
 2. Search entity index + chunk index (already done)
 3. For each hit: fetch entity from store, apply confidence decay (`confidence.rs`), compute `combined_score(similarity, decayed_confidence)`
 4. Sort descending, truncate to `top_k`, filter below `min_confidence`
 5. Return `ContextResult` with `ContextItem` per hit
 
-`serializer.rs`: implement `serialize(result: &ContextResult) -> String` — produces the token-efficient JSON format from the architecture doc (tables with relevant columns, joins, metrics, warnings for low-confidence entities). Also implement `ContextSerializer::format_table` used by `describe_table` in the MCP tools.
+Also in `feedback.rs`: `record_feedback()` (line ~48) has a TODO for the UPDATE query.
 
-`feedback.rs`: implement `record_interaction` — insert an `AgentInteraction` row via the store.
+### Phase 6 — Document Pipeline ✅ COMPLETE
 
-### Phase 6 — Document Pipeline
+`crates/arcana-documents/src/` — `sources/markdown.rs`, `chunker.rs` (heading-aware splitting), `linker.rs` (exact + fuzzy entity linking), `pipeline.rs` (fetch → chunk → embed → link → persist). All tested.
 
-File: `crates/arcana-documents/src/`
-
-`sources/markdown.rs`: walk a directory, read `.md` files, return `RawDocument` structs.
-
-`chunker.rs` (`StructureAwareChunker`): split on headings (`#`, `##`, `###`), preserve heading ancestry as `section_path`. If a section exceeds `max_chunk_tokens` (512), split on paragraph breaks with 50-token overlap.
-
-`linker.rs` (`EntityLinker`): exact-match scan for known table/column names in each chunk text. Fuzzy match for common aliases. Return `EntityLink` with confidence 0.65 for exact, 0.50 for fuzzy. (LLM-assisted linking is Phase 2.)
-
-`pipeline.rs`: orchestrate the six stages — ingest → chunk → link → embed → enrich → (refresh later). The `enrich` stage creates `SemanticDefinition` rows for each `(chunk, entity_link)` pair with confidence > 0.5.
-
-### Phase 7 — CLI Wiring
+### Phase 7 — CLI Wiring (partial — only `cmd_init` done)
 
 File: `crates/arcana-cli/src/main.rs`
 
-All commands have stubs. Wire them up:
+`cmd_init` is complete. The remaining 6 commands are stubbed with `todo!()`:
 
-- `cmd_init`: already mostly done (writes config, opens store)
-- `cmd_sync`: load config, build adapter (dbt or snowflake based on config), call `full_sync()`, upsert results into store
+- `cmd_sync`: load config, build adapter (dbt or snowflake based on config), call `sync()`, upsert results into store
 - `cmd_ingest`: build `MarkdownSource`, run `IngestPipeline`, report stats
 - `cmd_serve --stdio`: build `ArcanaServer`, call `serve_stdio()`
 - `cmd_ask`: embed query, call `ranker.rank()`, call `serializer.serialize()`, print
 - `cmd_status`: query store for counts, print table
 - `cmd_reembed`: fetch all entities and chunks, re-embed in batches, update embeddings in store
 
-### Phase 8 — MCP Integration Test
+### Phase 8 — MCP Wiring (partial — `estimate_cost` tool stubbed)
 
-With the above complete, do an end-to-end test:
+`crates/arcana-mcp/src/tools.rs` — `get_context`, `describe_table`, and `update_context` tools are complete. `estimate_cost` (line ~191) has a `todo!()` — needs to delegate to `arcana-adapters::snowflake::cost::estimate_query_cost()`.
+
+End-to-end integration test:
 1. Point at a real dbt project, run `arcana sync --adapter dbt`
 2. Run `arcana ask "monthly revenue by region"` — verify it returns sensible tables/columns
 3. Start `arcana serve --stdio`, wire to Claude Desktop
