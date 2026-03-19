@@ -40,11 +40,11 @@ impl FeedbackRecorder {
     /// Record feedback (thumbs up/down) for a previous interaction.
     pub async fn record_feedback(
         &self,
-        _interaction_id: Uuid,
+        interaction_id: Uuid,
         was_helpful: bool,
     ) -> Result<()> {
-        // TODO: UPDATE agent_interactions SET was_helpful = ? WHERE id = ?
-        let _ = was_helpful;
-        todo!("implement feedback recording in store")
+        self.store
+            .update_interaction_feedback(interaction_id, was_helpful)
+            .await
     }
 }

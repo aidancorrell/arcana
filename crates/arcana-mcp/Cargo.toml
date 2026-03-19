@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 arcana-core = { path = "../arcana-core" }
+arcana-adapters = { path = "../arcana-adapters" }
 arcana-recommender = { path = "../arcana-recommender" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
