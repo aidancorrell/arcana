@@ -188,10 +188,24 @@ pub async fn handle_describe_table(
 }
 
 /// Handles the `estimate_cost` MCP tool.
-pub async fn handle_estimate_cost(input: EstimateCostInput) -> Result<EstimateCostOutput> {
-    // TODO: delegate to arcana-adapters::snowflake::cost::estimate_query_cost
-    let _ = input;
-    todo!("implement cost estimation via Snowflake adapter")
+pub async fn handle_estimate_cost(
+    input: EstimateCostInput,
+    snowflake_config: Option<Arc<arcana_adapters::snowflake::SnowflakeConfig>>,
+) -> Result<EstimateCostOutput> {
+    let config = snowflake_config
+        .ok_or_else(|| anyhow::anyhow!("Snowflake is not configured — cannot estimate cost"))?;
+
+    let mut client =
+        arcana_adapters::snowflake::client::SnowflakeClient::new((*config).clone());
+    let estimate =
+        arcana_adapters::snowflake::cost::estimate_query_cost(&mut client, &input.sql, &input.warehouse_size)
+            .await?;
+
+    Ok(EstimateCostOutput {
+        estimated_credits: estimate.credits,
+        estimated_usd: estimate.estimated_usd,
+        explanation: estimate.explanation,
+    })
 }
 
 /// Handles the `update_context` MCP tool.
