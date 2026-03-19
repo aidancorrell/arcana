@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use arcana_core::entities::{Column, LineageEdge, Schema, Table};
+use arcana_core::entities::{Column, LineageEdge, Metric, Schema, SemanticDefinition, Table};
 
 /// Output of a metadata adapter sync operation.
 #[derive(Debug, Default)]
@@ -9,6 +9,8 @@ pub struct SyncOutput {
     pub tables: Vec<Table>,
     pub columns: Vec<Column>,
     pub lineage_edges: Vec<LineageEdge>,
+    pub semantic_definitions: Vec<SemanticDefinition>,
+    pub metrics: Vec<Metric>,
     pub stats: SyncStats,
 }
 
