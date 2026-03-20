@@ -117,6 +117,7 @@ async fn ranker_returns_empty_for_no_indexed_entities() {
         top_k: 10,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
     let result = ranker.rank(&request).await.unwrap();
     assert!(result.items.is_empty());
@@ -162,6 +163,7 @@ async fn ranker_finds_relevant_tables() {
         top_k: 5,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
     let result = ranker.rank(&request).await.unwrap();
     assert!(!result.items.is_empty());
@@ -206,6 +208,7 @@ async fn ranker_respects_top_k() {
         top_k: 3,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
     let result = ranker.rank(&request).await.unwrap();
     assert!(result.items.len() <= 3);
@@ -249,6 +252,7 @@ async fn ranker_deduplicates_by_entity_id() {
         top_k: 10,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
     let result = ranker.rank(&request).await.unwrap();
 
@@ -297,6 +301,7 @@ fn sample_result() -> ContextResult {
             },
         ],
         estimated_tokens: 50,
+        lineage_edges: vec![],
     }
 }
 
@@ -396,6 +401,7 @@ fn serialize_respects_token_budget() {
             },
         ],
         estimated_tokens: 100,
+        lineage_edges: vec![],
     };
 
     let output = serializer.serialize(&result);

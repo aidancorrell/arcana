@@ -1,4 +1,4 @@
-use arcana_core::entities::{Column, SemanticDefinition, Table};
+use arcana_core::entities::{Column, LineageEdge, SemanticDefinition, Table};
 
 use crate::ranker::{ContextItem, ContextResult};
 
@@ -60,6 +60,15 @@ impl ContextSerializer {
             token_budget -= section_tokens;
         }
 
+        // Append lineage DAG if present
+        if !result.lineage_edges.is_empty() {
+            let lineage_section = format_lineage_dag(&result.lineage_edges);
+            let lineage_tokens = lineage_section.len() / 4;
+            if lineage_tokens <= token_budget {
+                out.push_str(&lineage_section);
+            }
+        }
+
         if out.is_empty() {
             "No relevant context found.".to_string()
         } else {
@@ -100,6 +109,7 @@ impl ContextSerializer {
     }
 
     /// Format a Table entity into a compact Markdown block.
+    /// This is a static utility method used by describe_table.
     pub fn format_table(table: &Table, columns: &[Column], definitions: &[SemanticDefinition]) -> String {
         let mut out = format!("**Table:** `{}`\n", table.name);
         if let Some(desc) = &table.description {
@@ -131,4 +141,19 @@ impl ContextSerializer {
 
         out
     }
+}
+
+/// Render lineage edges as a compact Markdown DAG section.
+fn format_lineage_dag(edges: &[LineageEdge]) -> String {
+    if edges.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("### Lineage\n```\n");
+    for edge in edges {
+        let short_up = &edge.upstream_id.to_string()[..8];
+        let short_down = &edge.downstream_id.to_string()[..8];
+        out.push_str(&format!("{short_up}.. → {short_down}..\n"));
+    }
+    out.push_str("```\n\n");
+    out
 }

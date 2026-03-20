@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::entities::{
     Column, ColumnProfile, DataContract, DataSource, Document, DocumentChunk, EntityLink,
-    LineageEdge, Metric, Schema, SemanticDefinition, Table, UsageRecord, AgentInteraction,
+    LineageEdge, Metric, Schema, SemanticDefinition, Table, TableCluster, TableClusterMember,
+    UsageRecord, AgentInteraction,
 };
 
 /// The primary metadata store trait — implemented by SQLite (and later PostgreSQL).
@@ -59,6 +60,13 @@ pub trait MetadataStore: Send + Sync {
     async fn upsert_chunk(&self, chunk: &DocumentChunk) -> Result<()>;
     async fn list_chunks(&self, document_id: Uuid) -> Result<Vec<DocumentChunk>>;
     async fn upsert_entity_link(&self, link: &EntityLink) -> Result<()>;
+
+    // --- TableCluster (dedup) ---
+    async fn upsert_table_cluster(&self, cluster: &TableCluster) -> Result<()>;
+    async fn upsert_cluster_member(&self, member: &TableClusterMember) -> Result<()>;
+    async fn get_cluster_for_table(&self, table_id: Uuid) -> Result<Option<(TableCluster, Vec<TableClusterMember>)>>;
+    async fn list_table_clusters(&self) -> Result<Vec<TableCluster>>;
+    async fn clear_table_clusters(&self) -> Result<()>;
 
     // --- Usage ---
     async fn insert_usage_record(&self, record: &UsageRecord) -> Result<()>;

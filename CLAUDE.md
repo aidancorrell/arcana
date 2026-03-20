@@ -80,11 +80,11 @@ All 28 `MetadataStore` methods implemented in `crates/arcana-core/src/store/sqli
 
 ### Phase 7 — CLI Wiring ✅ COMPLETE
 
-`crates/arcana-cli/src/main.rs` — All 8 commands implemented: `init`, `sync` (dbt + Snowflake), `ingest` (Markdown pipeline), `serve --stdio` (MCP server), `ask` (semantic search), `status` (entity counts), `reembed` (batch re-embedding), `enrich` (LLM-generated descriptions). AppConfig parses `[dbt]`, `[snowflake]`, and `[enrichment]` TOML sections.
+`crates/arcana-cli/src/main.rs` — All 9 commands implemented: `init`, `sync` (dbt + Snowflake), `ingest` (Markdown pipeline), `serve --stdio` (MCP server), `ask` (semantic search), `status` (entity counts), `reembed` (batch re-embedding), `enrich` (LLM-generated descriptions), `dedup` (redundancy detection). AppConfig parses `[dbt]`, `[snowflake]`, and `[enrichment]` TOML sections.
 
 ### Phase 8 — MCP Wiring ✅ COMPLETE
 
-`crates/arcana-mcp/src/tools.rs` — All 4 tools implemented: `get_context`, `describe_table`, `estimate_cost` (delegates to Snowflake adapter), `update_context`. `ArcanaServer` carries optional `SnowflakeConfig` for cost estimation.
+`crates/arcana-mcp/src/tools.rs` — All 5 tools implemented: `get_context`, `describe_table`, `estimate_cost` (delegates to Snowflake adapter), `update_context`, `find_similar_tables` (redundancy detection). `ArcanaServer` carries optional `SnowflakeConfig` for cost estimation.
 
 ### Phase 9 — MVP Test Suite ✅ COMPLETE
 
@@ -140,26 +140,30 @@ Two-stage retrieval: FTS5 BM25 + dense cosine → Reciprocal Rank Fusion → con
 
 ---
 
-### Phase C — Redundancy Detection  ⬜ TODO
+### Phase C — Redundancy Detection  ✅ COMPLETE (branch `feat/scale-phase-cd`)
 
 Cluster semantically similar table definitions, surface duplicates, designate canonicals.
 
-- After reembed, compute pairwise cosine similarity for all table-level definitions
-- Tables with similarity > 0.92 flagged as potential duplicates
-- `arcana dedup [--threshold 0.92] [--dry-run]` — shows clusters, lets user mark canonical
-- New MCP tool: `find_similar_tables(table_name)` — returns similar tables with recommendation
-- `get_context` response includes `canonical` flag and deprecation warnings for non-canonical tables
+- `0003_table_clusters.sql` — `table_clusters` and `table_cluster_members` tables with foreign keys.
+- `arcana-core/src/entities/cluster.rs` — `TableCluster` and `TableClusterMember` structs.
+- `MetadataStore` extended with 5 cluster methods: `upsert_table_cluster`, `upsert_cluster_member`, `get_cluster_for_table`, `list_table_clusters`, `clear_table_clusters`.
+- `VectorIndex::pairs_above_threshold(f32)` — pairwise cosine similarity for all stored vectors. `VectorIndex::get(Uuid)` — retrieve stored embedding.
+- `arcana-recommender/src/dedup.rs` — `find_clusters()` (union-find single-linkage clustering) + `find_similar_to()` (kNN filtered to tables).
+- `arcana dedup [--threshold 0.92] [--dry-run]` — CLI command shows clusters, persists canonical designations.
+- New MCP tool: `find_similar_tables(table_ref, threshold, limit)` — returns similar tables with similarity scores and canonical flags.
+- `get_context` response labels non-canonical tables with `[non-canonical — prefer X]` warning.
 
 ---
 
-### Phase D — Graph-Aware Context Assembly  ⬜ TODO
+### Phase D — Graph-Aware Context Assembly  ✅ COMPLETE (branch `feat/scale-phase-cd`)
 
 Lineage traversal on search hits: return the metric + upstream tables + column definitions in one response.
 
-- `RelevanceRanker::rank()` gets optional `expand_lineage: bool`
-- For each top-k table hit, call `store.get_upstream(table_id)` and include first-degree upstream tables within token budget
-- `ContextResult` gets `lineage_summary: Option<String>` rendered as a DAG path
-- Domain clustering: group tables by definition similarity, return full domain picture
+- `ContextRequest` extended with `expand_lineage: bool` (default: false for CLI, true for MCP).
+- `ContextResult` extended with `lineage_edges: Vec<LineageEdge>`.
+- `RelevanceRanker::rank()` — when `expand_lineage` is true, fetches first-degree upstream tables for each table hit and injects them as `[upstream]` context items within token budget.
+- Serializer renders lineage edges as a compact DAG section in Markdown output.
+- MCP `get_context` tool exposes `expand_lineage` parameter (default true).
 
 ---
 
@@ -196,8 +200,8 @@ Snowflake `INFORMATION_SCHEMA` (no dbt required), BigQuery, Databricks Unity Cat
 |-------|--------|--------|
 | A — Hybrid Search | Very High | ✅ Done |
 | B — Auto-Description | Very High | ✅ Done |
-| C — Redundancy Detection | High | ⬜ Next |
-| D — Graph-Aware Context | High | ⬜ Queued |
+| C — Redundancy Detection | High | ✅ Done |
+| D — Graph-Aware Context | High | ✅ Done |
 | E — Feedback Loop | Medium | ⬜ Queued |
 | F — Performance | Medium | ⬜ Queued |
 | G — Adapters | Varies | ⬜ On demand |
@@ -258,39 +262,13 @@ auto_enrich_on_sync = false  # opt-in: run enrich after every sync
 
 ---
 
-### Phase C — Redundancy Detection  ⬜ TODO
-**Problem:** Large dbt projects accumulate near-duplicate tables: `fct_orders`, `fct_orders_v2`, `fct_orders_legacy`, `fct_orders_new`. Agents don't know which is canonical. They guess wrong.
-
-**Solution:** Cluster semantically similar table definitions and surface duplicates as a first-class catalog concept.
-
-**Approach:**
-- After reembed, compute pairwise cosine similarity for all table-level definitions
-- Tables with similarity > 0.92 are flagged as potential duplicates
-- New entity: `TableCluster` — groups similar tables and designates one as canonical
-- `get_context` response includes a `canonical` flag and deprecation warnings for non-canonical tables
-- New CLI command: `arcana dedup [--threshold 0.92] [--dry-run]` — shows duplicate clusters, lets user mark canonical
-
-**Lineage-based dedup signal:** If table B's lineage shows it derives entirely from table A with no transformations, it's a candidate for deprecation.
-
-**New MCP tool:** `find_similar_tables(table_name)` — returns similar tables with similarity scores and a recommendation on which to use.
-
-**Success metric:** On a 2000-model project, `arcana dedup` surfaces the known legacy/duplicate tables that the data team is aware of but never cleaned up.
+### Phase C — Redundancy Detection  ✅ COMPLETE
+See concise summary above.
 
 ---
 
-### Phase D — Graph-Aware Context Assembly  ⬜ TODO
-**Problem:** The ranker returns individual definitions. An agent asking "how is lifetime_value calculated?" needs the metric definition AND the tables it depends on AND the columns in those tables. Right now it gets whichever individual definitions happen to score highest.
-
-**Solution:** Lineage-aware subgraph assembly. When a table hits in search results, fetch its upstream lineage to depth N and include key upstream definitions in the context budget.
-
-**Implementation:**
-- `RelevanceRanker::rank()` gets an optional `expand_lineage: bool` parameter
-- When true: for each top-k table hit, call `store.get_upstream(table_id)` and include first-degree upstream tables in context (subject to token budget)
-- `ContextResult` gets a `lineage_summary: Option<String>` field rendered as a DAG path in markdown
-
-**Domain clustering:** Group tables into logical domains (finance, marketing, product) by clustering their definitions. When an agent asks about revenue, return the full revenue domain picture, not just the closest individual hit.
-
-**Success metric:** "How is lifetime_value calculated?" returns a context block that includes `fct_orders`, `stg_payments`, and the metric definition in one response — not three separate queries.
+### Phase D — Graph-Aware Context Assembly  ✅ COMPLETE
+See concise summary above.
 
 ---
 
@@ -347,8 +325,8 @@ m = 16
 |-------|--------|--------|-------------|
 | A — Hybrid Search | Very High | Medium | ✅ Yes |
 | B — Auto-Description | Very High | Medium | ✅ Yes |
-| C — Redundancy Detection | High | Medium | Second batch |
-| D — Graph-Aware Context | High | High | Second batch |
+| C — Redundancy Detection | High | Medium | ✅ Done |
+| D — Graph-Aware Context | High | High | ✅ Done |
 | E — Feedback Loop | Medium | High | Third batch |
 | F — Performance | Medium | Medium | Third batch |
 | G — Adapters | Varies | Medium | On demand |
