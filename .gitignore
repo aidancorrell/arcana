@@ -29,3 +29,9 @@ Thumbs.db
 
 # Build artifacts
 dist/
+
+# Sandbox — local test workspace
+# Keep README.md and setup.sh committed; ignore everything else
+sandbox/*
+!sandbox/README.md
+!sandbox/setup.sh
