@@ -275,7 +275,8 @@ async fn cmd_init(path: &PathBuf, _cfg: &AppConfig) -> Result<()> {
     }
 
     // Initialize the SQLite store
-    let db_url = format!("sqlite://{}/arcana.db", path.display());
+    let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let db_url = format!("sqlite:///{}/arcana.db", abs_path.display());
     arcana_core::store::SqliteStore::open(&db_url)
         .await
         .context("failed to initialize SQLite metadata store")?;
