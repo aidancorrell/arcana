@@ -10,7 +10,8 @@ use crate::entities::{
     ContractType, DataContract, DataSource, DataSourceType, Document, DocumentChunk,
     DocumentSourceType, EntityLink, LineageEdge, LineageNodeType, LineageSource,
     LinkedEntityType, LinkMethod, Metric, MetricType, QueryType, Schema, SemanticDefinition,
-    SemanticEntityType, DefinitionSource, Table, TableType, UsageRecord,
+    SemanticEntityType, DefinitionSource, Table, TableCluster, TableClusterMember, TableType,
+    UsageRecord,
 };
 
 use super::MetadataStore;
@@ -846,6 +847,124 @@ impl MetadataStore for SqliteStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_lineage_edge).collect()
+    }
+
+    // --- TableCluster (dedup) ---
+
+    async fn upsert_table_cluster(&self, cluster: &TableCluster) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO table_clusters (id, label, canonical_id, threshold, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label = excluded.label,
+                canonical_id = excluded.canonical_id,
+                threshold = excluded.threshold,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(cluster.id.to_string())
+        .bind(&cluster.label)
+        .bind(cluster.canonical_id.map(|id| id.to_string()))
+        .bind(cluster.threshold)
+        .bind(cluster.created_at.to_rfc3339())
+        .bind(cluster.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn upsert_cluster_member(&self, member: &TableClusterMember) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO table_cluster_members (cluster_id, table_id, similarity)
+            VALUES (?, ?, ?)
+            ON CONFLICT(cluster_id, table_id) DO UPDATE SET similarity = excluded.similarity
+            "#,
+        )
+        .bind(member.cluster_id.to_string())
+        .bind(member.table_id.to_string())
+        .bind(member.similarity)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_cluster_for_table(&self, table_id: Uuid) -> Result<Option<(TableCluster, Vec<TableClusterMember>)>> {
+        let row = sqlx::query(
+            "SELECT tc.* FROM table_clusters tc \
+             JOIN table_cluster_members tcm ON tc.id = tcm.cluster_id \
+             WHERE tcm.table_id = ?",
+        )
+        .bind(table_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else { return Ok(None) };
+
+        let cluster = TableCluster {
+            id: parse_uuid(row.get("id"))?,
+            label: row.get("label"),
+            canonical_id: row.get::<Option<String>, _>("canonical_id")
+                .as_deref()
+                .map(parse_uuid)
+                .transpose()?,
+            threshold: row.get("threshold"),
+            created_at: row.get::<String, _>("created_at").parse()?,
+            updated_at: row.get::<String, _>("updated_at").parse()?,
+        };
+
+        let members = sqlx::query(
+            "SELECT * FROM table_cluster_members WHERE cluster_id = ?",
+        )
+        .bind(cluster.id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let members: Vec<TableClusterMember> = members
+            .iter()
+            .map(|r| {
+                Ok(TableClusterMember {
+                    cluster_id: parse_uuid(r.get("cluster_id"))?,
+                    table_id: parse_uuid(r.get("table_id"))?,
+                    similarity: r.get("similarity"),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Some((cluster, members)))
+    }
+
+    async fn list_table_clusters(&self) -> Result<Vec<TableCluster>> {
+        let rows = sqlx::query("SELECT * FROM table_clusters ORDER BY created_at")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(TableCluster {
+                    id: parse_uuid(row.get("id"))?,
+                    label: row.get("label"),
+                    canonical_id: row.get::<Option<String>, _>("canonical_id")
+                        .as_deref()
+                        .map(parse_uuid)
+                        .transpose()?,
+                    threshold: row.get("threshold"),
+                    created_at: row.get::<String, _>("created_at").parse()?,
+                    updated_at: row.get::<String, _>("updated_at").parse()?,
+                })
+            })
+            .collect()
+    }
+
+    async fn clear_table_clusters(&self) -> Result<()> {
+        sqlx::query("DELETE FROM table_cluster_members")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM table_clusters")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     // --- Document ---
