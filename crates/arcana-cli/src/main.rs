@@ -245,7 +245,8 @@ async fn cmd_init(path: &PathBuf, _cfg: &AppConfig) -> Result<()> {
     }
 
     // Initialize the SQLite store
-    let db_url = format!("sqlite://{}/arcana.db", path.display());
+    let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let db_url = format!("sqlite:///{}/arcana.db", abs_path.display());
     arcana_core::store::SqliteStore::open(&db_url)
         .await
         .context("failed to initialize SQLite metadata store")?;
@@ -402,6 +403,14 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
     let entity_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
     let chunk_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
 
+    // Warm the in-memory index from stored embeddings
+    let all_defs = store.list_all_semantic_definitions().await?;
+    for def in &all_defs {
+        if let Some(emb) = &def.embedding {
+            entity_index.upsert(def.entity_id, emb.clone())?;
+        }
+    }
+
     let ranker = Arc::new(arcana_recommender::RelevanceRanker::new(
         store.clone(),
         embedding_provider,
@@ -439,6 +448,14 @@ async fn cmd_ask(cfg: &AppConfig, query: &str, top_k: usize, format: &str) -> Re
 
     let entity_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
     let chunk_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
+
+    // Warm the in-memory index from stored embeddings
+    let all_defs = store.list_all_semantic_definitions().await?;
+    for def in &all_defs {
+        if let Some(emb) = &def.embedding {
+            entity_index.upsert(def.entity_id, emb.clone())?;
+        }
+    }
 
     let ranker = arcana_recommender::RelevanceRanker::new(
         store,
