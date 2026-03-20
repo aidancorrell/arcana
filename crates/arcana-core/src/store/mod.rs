@@ -35,6 +35,7 @@ pub trait MetadataStore: Send + Sync {
     // --- SemanticDefinition ---
     async fn upsert_semantic_definition(&self, def: &SemanticDefinition) -> Result<()>;
     async fn get_semantic_definitions(&self, entity_id: Uuid) -> Result<Vec<SemanticDefinition>>;
+    async fn list_all_semantic_definitions(&self) -> Result<Vec<SemanticDefinition>>;
 
     // --- Metric ---
     async fn upsert_metric(&self, metric: &Metric) -> Result<()>;

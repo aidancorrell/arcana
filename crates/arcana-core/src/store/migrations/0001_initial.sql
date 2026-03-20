@@ -1,7 +1,6 @@
 -- Arcana initial schema migration
 -- All UUIDs stored as TEXT; timestamps stored as TEXT (ISO 8601).
 
-PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 -- -------------------------------------------------------------------------

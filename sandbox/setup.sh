@@ -76,6 +76,7 @@ decay_rate_per_day = 0.02
 stale_threshold = 0.4
 
 [mcp]
+bind_addr = "127.0.0.1:8477"
 max_context_tokens = 8000
 TOML
   echo "[ok] arcana.toml created — set your OPENAI_API_KEY"
