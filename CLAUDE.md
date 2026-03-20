@@ -204,6 +204,159 @@ Snowflake `INFORMATION_SCHEMA` (no dbt required), BigQuery, Databricks Unity Cat
 
 ---
 
+## Scale Roadmap — 2000+ Model dbt Projects
+
+The MVP works on jaffle-shop (19 models). The following phases target production-scale catalogs where the hard problems are search quality, undocumented models, table redundancy, and context budget.
+
+Priority order is based on impact: a large org with 2000 models and no descriptions gets zero value from arcana unless phases A and B ship first.
+
+---
+
+### Phase A — Hybrid Search + Re-ranking  ⬜ TODO
+**Problem:** At 2000 models the flat cosine scan returns too many mediocre hits (all scores within 0.05 of each other). The churn query above illustrates this — 8 results, all at 0.44–0.49, no clear winner.
+
+**Solution:** Two-stage retrieval.
+- Stage 1 (recall): BM25 sparse retrieval (tantivy crate) OR SQLite FTS5 `MATCH` query retrieves top-50 candidates by keyword overlap
+- Stage 2 (precision): dense cosine re-ranks the 50 candidates to top-k
+- Optional stage 3: cross-encoder re-ranking via a small Claude call (classify each candidate as relevant/not for the query) — expensive but accurate
+
+**Implementation sketch:**
+- Add `arcana-core/src/store/fts.rs` — FTS5 virtual table over `semantic_definitions.definition`
+- `MetadataStore` gets `fts_search(query, limit) -> Vec<(Uuid, f32)>`
+- `RelevanceRanker::rank()` fuses BM25 hits + vector hits via Reciprocal Rank Fusion before re-ranking
+- No new dependencies if using FTS5 (already in SQLite)
+
+**Success metric:** "churn" query returns `most_recent_order_date` as the clear #1 hit, not buried at #7.
+
+---
+
+### Phase B — Auto-Description Generation  ⬜ TODO
+**Problem:** Large orgs have hundreds of undocumented models. Arcana's semantic search is only as good as the definitions it has. Models with no dbt description = invisible.
+
+**Solution:** For every table/column with no `SemanticDefinition` (or a very low-confidence one), call Claude to synthesize a definition from:
+- Table name + column names
+- Sample SQL from the dbt model (from `manifest.json` `compiled_code` field)
+- Upstream table names from lineage
+
+Auto-generated definitions get `DefinitionSource::LlmDrafted` (confidence 0.40) and are flagged for human review.
+
+**New CLI command:** `arcana enrich [--dry-run] [--model <table>]`
+- Finds all entities with no definition or confidence < 0.5
+- Calls Claude in batches (50 tables per prompt) with structured output
+- Writes definitions back via `upsert_semantic_definition`
+- Optionally flags them in the store for human review
+
+**New config key:**
+```toml
+[enrichment]
+model = "claude-opus-4-6"  # or haiku for cost efficiency
+batch_size = 50
+auto_enrich_on_sync = false  # opt-in: run enrich after every sync
+```
+
+**Success metric:** 2000-model project goes from 20% definition coverage to 90%+ in a single `arcana enrich` run.
+
+---
+
+### Phase C — Redundancy Detection  ⬜ TODO
+**Problem:** Large dbt projects accumulate near-duplicate tables: `fct_orders`, `fct_orders_v2`, `fct_orders_legacy`, `fct_orders_new`. Agents don't know which is canonical. They guess wrong.
+
+**Solution:** Cluster semantically similar table definitions and surface duplicates as a first-class catalog concept.
+
+**Approach:**
+- After reembed, compute pairwise cosine similarity for all table-level definitions
+- Tables with similarity > 0.92 are flagged as potential duplicates
+- New entity: `TableCluster` — groups similar tables and designates one as canonical
+- `get_context` response includes a `canonical` flag and deprecation warnings for non-canonical tables
+- New CLI command: `arcana dedup [--threshold 0.92] [--dry-run]` — shows duplicate clusters, lets user mark canonical
+
+**Lineage-based dedup signal:** If table B's lineage shows it derives entirely from table A with no transformations, it's a candidate for deprecation.
+
+**New MCP tool:** `find_similar_tables(table_name)` — returns similar tables with similarity scores and a recommendation on which to use.
+
+**Success metric:** On a 2000-model project, `arcana dedup` surfaces the known legacy/duplicate tables that the data team is aware of but never cleaned up.
+
+---
+
+### Phase D — Graph-Aware Context Assembly  ⬜ TODO
+**Problem:** The ranker returns individual definitions. An agent asking "how is lifetime_value calculated?" needs the metric definition AND the tables it depends on AND the columns in those tables. Right now it gets whichever individual definitions happen to score highest.
+
+**Solution:** Lineage-aware subgraph assembly. When a table hits in search results, fetch its upstream lineage to depth N and include key upstream definitions in the context budget.
+
+**Implementation:**
+- `RelevanceRanker::rank()` gets an optional `expand_lineage: bool` parameter
+- When true: for each top-k table hit, call `store.get_upstream(table_id)` and include first-degree upstream tables in context (subject to token budget)
+- `ContextResult` gets a `lineage_summary: Option<String>` field rendered as a DAG path in markdown
+
+**Domain clustering:** Group tables into logical domains (finance, marketing, product) by clustering their definitions. When an agent asks about revenue, return the full revenue domain picture, not just the closest individual hit.
+
+**Success metric:** "How is lifetime_value calculated?" returns a context block that includes `fct_orders`, `stg_payments`, and the metric definition in one response — not three separate queries.
+
+---
+
+### Phase E — Self-Improving Feedback Loop  ⬜ TODO
+**Problem:** The catalog starts cold. Confidence is static (0.80 for all dbt adapter-sourced definitions). There's no mechanism for the catalog to get better from use.
+
+**Solution:** Query history as evidence. Every time an agent uses arcana context to write a query that succeeds, that interaction is evidence that the definitions used were correct. Boost confidence on those definitions.
+
+**Signals:**
+1. **Explicit feedback:** `update_context` tool call from the agent after a successful query — already exists, just needs a confidence-boost side effect
+2. **Query history mining:** `arcana sync --adapter snowflake` now also ingests `QUERY_HISTORY` — extract which tables were joined together in successful queries, weight those joins as evidence
+3. **Cross-session pattern mining:** If 40 distinct agents have fetched context about `customers` + `orders` in the same session, that co-occurrence is a strong signal — surface it as a pre-built join recommendation
+
+**New concept: `EvidenceRecord`** — a lightweight table linking (entity_id, query_text, outcome: success|failure, source: agent|human) used to compute empirical confidence alongside the decay-based confidence.
+
+**Success metric:** After 30 days of agent usage on a production catalog, confidence scores reflect actual query success rates, not just definition source provenance.
+
+---
+
+### Phase F — Performance at Scale  ⬜ TODO
+**Problem:** 2000 models × ~10 definitions + all columns = ~25k–50k vectors. The flat O(n) cosine scan becomes slow. Incremental sync is also missing — a full re-sync of a 2000-model project is expensive.
+
+**Solutions:**
+- **HNSW index:** Replace `VectorIndex` flat scan with `usearch` crate (pure Rust, zero-copy). Sub-millisecond ANN search at 1M vectors.
+- **Persistent index:** Serialize the HNSW index to disk on shutdown, load on startup — skip warming from SQLite on every launch
+- **Incremental sync:** dbt manifest has `node_relation.checksum` per model. Store checksums; only re-sync models whose checksum changed. Re-embed only changed definitions.
+- **Embedding cache:** Hash definition text → cache embedding. Reembed only when text changes, not on every `reembed` invocation.
+
+**New config key:**
+```toml
+[index]
+backend = "hnsw"         # or "flat" (default, no deps)
+persist_path = "./arcana.idx"
+ef_construction = 200
+m = 16
+```
+
+**Success metric:** `arcana serve --stdio` startup time on a 50k-vector index < 200ms. Full sync of a 2000-model project with 10% changed models takes < 30s instead of minutes.
+
+---
+
+### Phase G — Additional Adapters  ⬜ TODO
+- **Snowflake `INFORMATION_SCHEMA`** — schema/column sync without needing dbt. Any Snowflake warehouse works, not just dbt-managed ones.
+- **BigQuery `INFORMATION_SCHEMA`** — same pattern.
+- **Databricks Unity Catalog** — REST API for table/column metadata, lineage from Delta Lake.
+- **LookML** — parse `view` and `explore` files for field definitions (high value: LookML definitions are often very good).
+- **dbt Cloud API** — pull dbt docs from hosted dbt Cloud instead of local `manifest.json`.
+
+---
+
+### Summary: Priority for a 2000-Model Project
+
+| Phase | Impact | Effort | Ship first? |
+|-------|--------|--------|-------------|
+| A — Hybrid Search | Very High | Medium | ✅ Yes |
+| B — Auto-Description | Very High | Medium | ✅ Yes |
+| C — Redundancy Detection | High | Medium | Second batch |
+| D — Graph-Aware Context | High | High | Second batch |
+| E — Feedback Loop | Medium | High | Third batch |
+| F — Performance | Medium | Medium | Third batch |
+| G — Adapters | Varies | Medium | On demand |
+
+Phases A and B together turn arcana from "works on well-documented small projects" to "works on any real-world dbt project."
+
+---
+
 ## Key Conventions
 
 - **All store queries use runtime `sqlx::query()` + `.bind()`.** No compile-time `query!` macros (avoids DATABASE_URL requirement at build time).
