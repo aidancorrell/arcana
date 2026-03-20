@@ -644,6 +644,55 @@ impl MetadataStore for SqliteStore {
         rows.iter().map(row_to_semantic_definition).collect()
     }
 
+    async fn fts_search(&self, query: &str, limit: u32) -> Result<Vec<(Uuid, f32)>> {
+        // FTS5 rank is negative BM25 (more negative = better). We flip the sign
+        // and normalize to [0, 1] relative to the best hit in this result set.
+        //
+        // Sanitize query: FTS5 MATCH syntax reserves chars like ?,*,^,",( etc.
+        // Strip anything that isn't alphanumeric, whitespace, or a hyphen.
+        let sanitized: String = query
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c.is_whitespace() { c } else { ' ' })
+            .collect();
+        let sanitized = sanitized.trim();
+
+        if sanitized.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows = sqlx::query(
+            "SELECT entity_id, rank FROM semantic_definitions_fts \
+             WHERE definition MATCH ? ORDER BY rank LIMIT ?",
+        )
+        .bind(sanitized)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results: Vec<(Uuid, f32)> = rows
+            .iter()
+            .map(|row| {
+                let entity_id: String = row.get("entity_id");
+                let rank: f64 = row.get("rank");
+                let uuid = parse_uuid(&entity_id)?;
+                Ok((uuid, (-rank) as f32))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Normalize scores to [0, 1]
+        if let Some(&(_, max_score)) = results.iter().max_by(|a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            if max_score > 0.0 {
+                for (_, score) in &mut results {
+                    *score /= max_score;
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     // --- Metric ---
 
     async fn upsert_metric(&self, metric: &Metric) -> Result<()> {

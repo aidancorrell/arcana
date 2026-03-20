@@ -1,5 +1,6 @@
 pub mod confidence;
 pub mod embeddings;
+pub mod enrichment;
 pub mod entities;
 pub mod store;
 

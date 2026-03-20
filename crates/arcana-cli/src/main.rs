@@ -97,6 +97,21 @@ enum Commands {
         #[arg(long, default_value = "100")]
         batch_size: usize,
     },
+
+    /// Generate LLM descriptions for tables/columns that have no semantic definition.
+    Enrich {
+        /// Preview what would be generated without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Only enrich entities whose names match this substring.
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// Number of entities to send per LLM call.
+        #[arg(long, default_value = "20")]
+        batch_size: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +123,8 @@ struct AppConfig {
     database: DatabaseConfig,
     embeddings: EmbeddingsConfig,
     mcp: McpConfig,
+    #[serde(default)]
+    enrichment: EnrichmentConfig,
     #[serde(default)]
     dbt: Option<DbtSectionConfig>,
     #[serde(default)]
@@ -169,6 +186,16 @@ struct SnowflakeSectionConfig {
     role: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, Default)]
+struct EnrichmentConfig {
+    /// Anthropic API key. Falls back to ANTHROPIC_API_KEY env var.
+    anthropic_api_key: Option<String>,
+    /// Claude model to use for enrichment (default: claude-haiku-4-5-20251001).
+    model: Option<String>,
+    /// Max entities per LLM call (default: 20).
+    batch_size: Option<usize>,
+}
+
 fn load_config(path: &PathBuf) -> Result<AppConfig> {
     if !path.exists() {
         tracing::warn!(
@@ -216,6 +243,9 @@ async fn main() -> Result<()> {
         Commands::Status => cmd_status(&cfg).await,
         Commands::Reembed { below_confidence, batch_size } => {
             cmd_reembed(&cfg, below_confidence, batch_size).await
+        }
+        Commands::Enrich { dry_run, filter, batch_size } => {
+            cmd_enrich(&cfg, dry_run, filter.as_deref(), batch_size).await
         }
     }
 }
@@ -612,6 +642,244 @@ async fn cmd_reembed(
     Ok(())
 }
 
+async fn cmd_enrich(
+    cfg: &AppConfig,
+    dry_run: bool,
+    filter: Option<&str>,
+    batch_size: usize,
+) -> Result<()> {
+    let store = open_store(cfg).await?;
+    let provider = build_enrichment_provider(cfg)?;
+
+    if dry_run {
+        println!("Dry run — no definitions will be written.");
+    }
+    println!("Enriching undescribed entities (batch_size={batch_size})...");
+
+    let mut table_count = 0usize;
+    let mut col_count = 0usize;
+    let mut skipped = 0usize;
+
+    let data_sources = store.list_data_sources().await?;
+
+    for ds in &data_sources {
+        let schemas = store.list_schemas(ds.id).await?;
+        for schema in &schemas {
+            let tables = store.list_tables(schema.id).await?;
+
+            // Collect table-level enrichment requests for this schema
+            let mut table_requests: Vec<arcana_core::enrichment::EnrichmentRequest> = Vec::new();
+            let mut table_ids: Vec<uuid::Uuid> = Vec::new();
+            let mut table_names_for_flush: Vec<String> = Vec::new();
+
+            for table in &tables {
+                // Apply optional name filter
+                if let Some(f) = filter {
+                    if !table.name.contains(f) {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+
+                // Skip if table already has a human-edited or adapter-sourced definition
+                let existing = store.get_semantic_definitions(table.id).await?;
+                let has_good_def = existing.iter().any(|d| {
+                    use arcana_core::entities::DefinitionSource;
+                    matches!(
+                        d.source,
+                        DefinitionSource::Manual | DefinitionSource::DbtYaml | DefinitionSource::SnowflakeComment
+                    )
+                });
+                if has_good_def {
+                    skipped += 1;
+                    continue;
+                }
+
+                let cols = store.list_columns(table.id).await?;
+                let col_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+
+                // Fetch upstream table names from lineage
+                let upstream_edges = store.get_upstream(table.id).await?;
+                let upstream_tables: Vec<String> = upstream_edges
+                    .iter()
+                    .map(|e| e.upstream_id.to_string())
+                    .collect();
+
+                table_requests.push(arcana_core::enrichment::EnrichmentRequest {
+                    table_name: table.name.clone(),
+                    column_names: col_names,
+                    upstream_tables,
+                    column_name: None,
+                });
+                table_ids.push(table.id);
+                table_names_for_flush.push(table.name.clone());
+
+                // Flush batch when full
+                if table_requests.len() >= batch_size {
+                    let count = flush_enrichment_batch(
+                        &store,
+                        &*provider,
+                        &table_requests,
+                        &table_ids,
+                        dry_run,
+                    )
+                    .await?;
+                    table_count += count;
+                    table_requests.clear();
+                    table_ids.clear();
+                    table_names_for_flush.clear();
+                }
+            }
+
+            // Flush remaining tables
+            if !table_requests.is_empty() {
+                let count = flush_enrichment_batch(
+                    &store,
+                    &*provider,
+                    &table_requests,
+                    &table_ids,
+                    dry_run,
+                )
+                .await?;
+                table_count += count;
+            }
+
+            // Column-level enrichment
+            for table in &tables {
+                if let Some(f) = filter {
+                    if !table.name.contains(f) {
+                        continue;
+                    }
+                }
+
+                let cols = store.list_columns(table.id).await?;
+                let mut col_requests: Vec<arcana_core::enrichment::EnrichmentRequest> = Vec::new();
+                let mut col_ids: Vec<uuid::Uuid> = Vec::new();
+                let all_col_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+
+                for col in &cols {
+                    let existing = store.get_semantic_definitions(col.id).await?;
+                    let has_good_def = existing.iter().any(|d| {
+                        use arcana_core::entities::DefinitionSource;
+                        matches!(
+                            d.source,
+                            DefinitionSource::Manual | DefinitionSource::DbtYaml | DefinitionSource::SnowflakeComment
+                        )
+                    });
+                    if has_good_def {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    col_requests.push(arcana_core::enrichment::EnrichmentRequest {
+                        table_name: table.name.clone(),
+                        column_names: all_col_names.clone(),
+                        upstream_tables: vec![],
+                        column_name: Some(col.name.clone()),
+                    });
+                    col_ids.push(col.id);
+
+                    if col_requests.len() >= batch_size {
+                        let count = flush_enrichment_batch(
+                            &store,
+                            &*provider,
+                            &col_requests,
+                            &col_ids,
+                            dry_run,
+                        )
+                        .await?;
+                        col_count += count;
+                        col_requests.clear();
+                        col_ids.clear();
+                    }
+                }
+
+                if !col_requests.is_empty() {
+                    let count = flush_enrichment_batch(
+                        &store,
+                        &*provider,
+                        &col_requests,
+                        &col_ids,
+                        dry_run,
+                    )
+                    .await?;
+                    col_count += count;
+                }
+            }
+        }
+    }
+
+    if dry_run {
+        println!(
+            "Would enrich {} tables, {} columns ({} skipped — already have definitions).",
+            table_count, col_count, skipped
+        );
+    } else {
+        println!(
+            "Enriched {} tables, {} columns ({} skipped — already have definitions).",
+            table_count, col_count, skipped
+        );
+        println!("Run `arcana reembed` to generate embeddings for the new definitions.");
+    }
+
+    Ok(())
+}
+
+/// Send one batch to the enrichment provider and write results back to the store.
+/// Returns the number of definitions written.
+async fn flush_enrichment_batch(
+    store: &arcana_core::store::SqliteStore,
+    provider: &dyn arcana_core::enrichment::EnrichmentProvider,
+    requests: &[arcana_core::enrichment::EnrichmentRequest],
+    entity_ids: &[uuid::Uuid],
+    dry_run: bool,
+) -> Result<usize> {
+    let responses = provider.enrich_batch(requests).await?;
+    let mut written = 0usize;
+
+    for (entity_id, (req, resp)) in entity_ids.iter().zip(requests.iter().zip(responses.iter())) {
+        if resp.definition.is_empty() {
+            continue;
+        }
+
+        let label = req
+            .column_name
+            .as_deref()
+            .unwrap_or(&req.table_name)
+            .to_string();
+
+        if dry_run {
+            println!("  [dry-run] {label}: {}", &resp.definition[..resp.definition.len().min(80)]);
+        } else {
+            use arcana_core::entities::{DefinitionSource, SemanticDefinition, SemanticEntityType};
+
+            let entity_type = if req.column_name.is_some() {
+                SemanticEntityType::Column
+            } else {
+                SemanticEntityType::Table
+            };
+
+            let def = SemanticDefinition {
+                id: uuid::Uuid::new_v4(),
+                entity_id: *entity_id,
+                entity_type,
+                definition: resp.definition.clone(),
+                source: DefinitionSource::LlmInferred,
+                confidence: 0.40,
+                embedding: None,
+                confidence_refreshed_at: Some(chrono::Utc::now()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            store.upsert_semantic_definition(&def).await?;
+            println!("  enriched {label}");
+        }
+        written += 1;
+    }
+
+    Ok(written)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -642,6 +910,29 @@ fn build_embedding_provider(
     Ok(Arc::new(arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
         api_key, model, dimensions,
     )))
+}
+
+fn build_enrichment_provider(
+    cfg: &AppConfig,
+) -> Result<Arc<dyn arcana_core::enrichment::EnrichmentProvider>> {
+    let api_key = cfg
+        .enrichment
+        .anthropic_api_key
+        .clone()
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        .context("Anthropic API key required — set enrichment.anthropic_api_key in config or ANTHROPIC_API_KEY env var")?;
+
+    let model = cfg
+        .enrichment
+        .model
+        .as_deref()
+        .unwrap_or("claude-haiku-4-5-20251001")
+        .to_string();
+    let batch_size = cfg.enrichment.batch_size.unwrap_or(20);
+
+    Ok(Arc::new(
+        arcana_core::enrichment::claude::ClaudeEnrichmentProvider::new(api_key, model, batch_size),
+    ))
 }
 
 fn build_snowflake_config(
