@@ -41,13 +41,12 @@ In scope:
 - MCP server: `get_context`, `describe_table`, `estimate_cost`, `update_context`
 - CLI: `arcana init`, `arcana sync`, `arcana ingest`, `arcana serve --stdio`, `arcana ask`
 
-Out of scope for MVP:
+Out of scope for MVP (may be addressed in scale roadmap):
 - React frontend
 - PostgreSQL backend
 - BigQuery, Databricks adapters
 - Confluence, Google Docs, Notion, Slack sources
 - Usage-based collaborative filtering
-- LLM-generated draft descriptions
 
 ---
 
@@ -81,7 +80,7 @@ All 28 `MetadataStore` methods implemented in `crates/arcana-core/src/store/sqli
 
 ### Phase 7 — CLI Wiring ✅ COMPLETE
 
-`crates/arcana-cli/src/main.rs` — All 7 commands implemented: `init`, `sync` (dbt + Snowflake), `ingest` (Markdown pipeline), `serve --stdio` (MCP server), `ask` (semantic search), `status` (entity counts), `reembed` (batch re-embedding). AppConfig parses `[dbt]` and `[snowflake]` TOML sections.
+`crates/arcana-cli/src/main.rs` — All 8 commands implemented: `init`, `sync` (dbt + Snowflake), `ingest` (Markdown pipeline), `serve --stdio` (MCP server), `ask` (semantic search), `status` (entity counts), `reembed` (batch re-embedding), `enrich` (LLM-generated descriptions). AppConfig parses `[dbt]`, `[snowflake]`, and `[enrichment]` TOML sections.
 
 ### Phase 8 — MCP Wiring ✅ COMPLETE
 
@@ -98,12 +97,110 @@ All 28 `MetadataStore` methods implemented in `crates/arcana-core/src/store/sqli
 ### End-to-end integration test (manual)
 
 1. `cd sandbox && ./setup.sh` (or point at your own dbt project)
-2. `export OPENAI_API_KEY="sk-..."`
+2. `export OPENAI_API_KEY="sk-..."` and `export ANTHROPIC_API_KEY="sk-ant-..."`
 3. `cargo run --bin arcana -- --config sandbox/arcana.toml sync --adapter dbt`
-4. `cargo run --bin arcana -- --config sandbox/arcana.toml reembed`
-5. `cargo run --bin arcana -- --config sandbox/arcana.toml ask "monthly revenue by region"` — verify it returns sensible tables/columns
-6. Start `arcana serve --stdio`, wire to Claude Desktop
-7. Measure first-try SQL accuracy vs baseline (Claude without Arcana)
+4. `cargo run --bin arcana -- --config sandbox/arcana.toml enrich --dry-run` — preview generated definitions
+5. `cargo run --bin arcana -- --config sandbox/arcana.toml enrich` — write LLM descriptions for undescribed tables/columns
+6. `cargo run --bin arcana -- --config sandbox/arcana.toml reembed` — embed all definitions including new ones
+7. `cargo run --bin arcana -- --config sandbox/arcana.toml ask "monthly revenue by region"` — verify it returns sensible tables/columns
+8. Start `arcana serve --stdio`, wire to Claude Code or Claude Desktop
+9. Measure first-try SQL accuracy vs baseline (Claude without Arcana)
+
+---
+
+## Scale Roadmap — 2000+ Model dbt Projects
+
+The MVP works on jaffle-shop (19 models). These phases target production-scale catalogs where the hard problems are search quality, undocumented models, table redundancy, and context budget.
+
+---
+
+### Phase A — Hybrid Search + Re-ranking  ✅ COMPLETE (PR #6, branch `feat/hybrid-search`)
+
+Two-stage retrieval: FTS5 BM25 + dense cosine → Reciprocal Rank Fusion → confidence-weighted scoring.
+
+- `0002_fts.sql` — FTS5 virtual table over `semantic_definitions` with INSERT/UPDATE/DELETE triggers. Backfills existing rows.
+- `MetadataStore::fts_search(query, limit)` — BM25 retrieval, input sanitized to strip FTS5 special chars, scores normalized to [0, 1].
+- `RelevanceRanker::rank()` — FTS + dense each return `top_k * 4` candidates, fused via RRF (k=60), normalized, then `combined_score(rrf, confidence)`. Document chunks use pure dense search.
+- Unit tests: `rrf_rewards_overlap`, `rrf_empty_lists`.
+
+---
+
+### Phase B — Auto-Description Generation  ✅ COMPLETE (PR #6, branch `feat/hybrid-search`)
+
+`arcana enrich` generates semantic definitions for undescribed tables and columns via Claude.
+
+- `arcana-core/src/enrichment/` — `EnrichmentProvider` trait + `ClaudeEnrichmentProvider` (Anthropic Messages API).
+  - Structured prompt includes table name, column names, upstream lineage.
+  - `---`-delimited response parsing; pads short responses rather than erroring.
+- `arcana enrich [--dry-run] [--filter <name>] [--batch-size <n>]`
+  - Skips entities already covered by `DbtYaml`, `Manual`, or `SnowflakeComment` definitions.
+  - Writes back with `DefinitionSource::LlmInferred` at confidence 0.40.
+  - Falls back to `ANTHROPIC_API_KEY` env var; configurable via `[enrichment]` section in arcana.toml.
+- After enrich, run `arcana reembed` to embed the new definitions.
+
+---
+
+### Phase C — Redundancy Detection  ⬜ TODO
+
+Cluster semantically similar table definitions, surface duplicates, designate canonicals.
+
+- After reembed, compute pairwise cosine similarity for all table-level definitions
+- Tables with similarity > 0.92 flagged as potential duplicates
+- `arcana dedup [--threshold 0.92] [--dry-run]` — shows clusters, lets user mark canonical
+- New MCP tool: `find_similar_tables(table_name)` — returns similar tables with recommendation
+- `get_context` response includes `canonical` flag and deprecation warnings for non-canonical tables
+
+---
+
+### Phase D — Graph-Aware Context Assembly  ⬜ TODO
+
+Lineage traversal on search hits: return the metric + upstream tables + column definitions in one response.
+
+- `RelevanceRanker::rank()` gets optional `expand_lineage: bool`
+- For each top-k table hit, call `store.get_upstream(table_id)` and include first-degree upstream tables within token budget
+- `ContextResult` gets `lineage_summary: Option<String>` rendered as a DAG path
+- Domain clustering: group tables by definition similarity, return full domain picture
+
+---
+
+### Phase E — Self-Improving Feedback Loop  ⬜ TODO
+
+Boost confidence on definitions that get used in successful queries.
+
+- `update_context` tool call after a successful query boosts confidence on definitions that were in the context
+- Snowflake `QUERY_HISTORY` mining: extract table co-occurrence from successful queries as evidence
+- New `EvidenceRecord` table linking (entity_id, query_text, outcome, source)
+
+---
+
+### Phase F — Performance at Scale  ⬜ TODO
+
+HNSW index, persistent index, incremental sync, embedding cache.
+
+- Replace flat `VectorIndex` with `usearch` crate (HNSW, sub-ms ANN at 1M vectors)
+- Serialize index to disk on shutdown, load on startup — skip full warm from SQLite
+- Incremental sync: store dbt manifest checksums, only re-sync changed models
+- Embedding cache: hash definition text → skip re-embedding unchanged definitions
+
+---
+
+### Phase G — Additional Adapters  ⬜ TODO
+
+Snowflake `INFORMATION_SCHEMA` (no dbt required), BigQuery, Databricks Unity Catalog, LookML, dbt Cloud API.
+
+---
+
+### Summary: Priority for a 2000-Model Project
+
+| Phase | Impact | Status |
+|-------|--------|--------|
+| A — Hybrid Search | Very High | ✅ Done |
+| B — Auto-Description | Very High | ✅ Done |
+| C — Redundancy Detection | High | ⬜ Next |
+| D — Graph-Aware Context | High | ⬜ Queued |
+| E — Feedback Loop | Medium | ⬜ Queued |
+| F — Performance | Medium | ⬜ Queued |
+| G — Adapters | Varies | ⬜ On demand |
 
 ---
 
