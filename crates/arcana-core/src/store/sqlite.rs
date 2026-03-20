@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{Row, SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions}};
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::entities::{
@@ -22,9 +23,13 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open (or create) a SQLite database at the given URL and run migrations.
     pub async fn open(database_url: &str) -> Result<Self> {
+        let opts = SqliteConnectOptions::from_str(database_url)
+            .context("invalid database URL")?
+            .journal_mode(SqliteJournalMode::Wal)
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(database_url)
+            .connect_with(opts)
             .await?;
 
         sqlx::migrate!("src/store/migrations").run(&pool).await?;
@@ -625,6 +630,15 @@ impl MetadataStore for SqliteStore {
             "SELECT * FROM semantic_definitions WHERE entity_id = ? ORDER BY confidence DESC",
         )
         .bind(entity_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_semantic_definition).collect()
+    }
+
+    async fn list_all_semantic_definitions(&self) -> Result<Vec<SemanticDefinition>> {
+        let rows = sqlx::query(
+            "SELECT * FROM semantic_definitions ORDER BY confidence DESC",
+        )
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_semantic_definition).collect()
