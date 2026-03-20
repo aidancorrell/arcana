@@ -6,6 +6,7 @@ members = [
     "crates/arcana-recommender",
     "crates/arcana-mcp",
     "crates/arcana-cli",
+    "crates/arcana-integration-tests",
 ]
 resolver = "2"
 
@@ -24,4 +25,5 @@ clap = { version = "=4.5.38", features = ["derive"] }
 reqwest = { version = "=0.12.15", features = ["json"] }
 config = "0.14"
 rmcp = { version = "0.1", features = ["server"] }
+
 
