@@ -5,7 +5,7 @@ use arcana_core::{
     entities::{Column, DocumentChunk, SemanticDefinition, Table},
     store::MetadataStore,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -85,29 +85,34 @@ impl RelevanceRanker {
         }
     }
 
-    /// Rank context items for a given request.
+    /// Rank context items for a given request using hybrid BM25 + dense retrieval.
+    ///
+    /// Stage 1 — retrieval: FTS5 BM25 and dense cosine search each return a
+    ///   candidate pool of `top_k * 4` results.
+    /// Stage 2 — fusion: Reciprocal Rank Fusion (RRF, k=60) merges both ranked
+    ///   lists into a single fused ranking without requiring score calibration.
+    /// Stage 3 — scoring: fetch each candidate entity, apply confidence decay,
+    ///   and compute `semantic_similarity * 0.7 + confidence * 0.3`.
     pub async fn rank(&self, request: &ContextRequest) -> Result<ContextResult> {
         let decay = ConfidenceDecay::default();
+        let candidate_n = request.top_k * 4;
 
-        // 1. Embed the query
+        // 1. Parallel candidate retrieval: FTS (BM25) + dense (cosine)
         let query_embedding = self.embedding_provider.embed(&request.query).await?;
 
-        // 2. Search entity index (tables, columns, semantic definitions)
-        let entity_hits = self
-            .entity_index
-            .search(&query_embedding, request.top_k * 2)?;
+        let fts_hits = self.store.fts_search(&request.query, candidate_n as u32).await?;
+        let vector_hits = self.entity_index.search(&query_embedding, candidate_n)?;
 
-        // 3. Search chunk index (document chunks)
-        let chunk_hits = self
-            .chunk_index
-            .search(&query_embedding, request.top_k)?;
+        // 2. Reciprocal Rank Fusion — produces a fused ranked list of entity_ids
+        let fused = rrf_fuse(&fts_hits, &vector_hits);
 
-        // 4. For each hit: fetch entity, apply confidence decay, compute combined score
+        // 3. Search chunk index separately (document chunks aren't in FTS)
+        let chunk_hits = self.chunk_index.search(&query_embedding, request.top_k)?;
+
+        // 4. For each fused hit: fetch entity, apply confidence decay, compute score
         let mut items: Vec<ContextItem> = Vec::new();
 
-        for (entity_id, similarity) in &entity_hits {
-            let similarity_f64 = *similarity as f64;
-
+        for (entity_id, rrf_score) in &fused {
             // Try as a table first
             if let Some(table) = self.store.get_table(*entity_id).await? {
                 if let Some(filter_id) = request.filter_table_id {
@@ -117,7 +122,7 @@ impl RelevanceRanker {
                 }
 
                 let decayed = decay.decayed_score(table.confidence, table.confidence_refreshed_at);
-                let score = Self::combined_score(similarity_f64, decayed.value());
+                let score = Self::combined_score(*rrf_score, decayed.value());
 
                 if score < request.min_confidence {
                     continue;
@@ -141,12 +146,12 @@ impl RelevanceRanker {
                 continue;
             }
 
-            // Not a table — check for semantic definitions (could be column or metric)
+            // Not a table — check for semantic definitions (column or metric)
             let definitions = self.store.get_semantic_definitions(*entity_id).await?;
             if let Some(best_def) = definitions.first() {
                 let decayed =
                     decay.decayed_score(best_def.confidence, best_def.confidence_refreshed_at);
-                let score = Self::combined_score(similarity_f64, decayed.value());
+                let score = Self::combined_score(*rrf_score, decayed.value());
 
                 if score < request.min_confidence {
                     continue;
@@ -174,7 +179,7 @@ impl RelevanceRanker {
             }
         }
 
-        // Process chunk hits
+        // Process chunk hits (document chunks bypass FTS/RRF — pure dense search)
         for (chunk_id, similarity) in &chunk_hits {
             let score = *similarity as f64;
             if score < request.min_confidence {
@@ -216,5 +221,69 @@ impl RelevanceRanker {
     /// Formula: `relevance * 0.7 + confidence * 0.3`
     pub fn combined_score(semantic_similarity: f64, confidence: f64) -> f64 {
         (semantic_similarity * 0.7 + confidence * 0.3).clamp(0.0, 1.0)
+    }
+}
+
+/// Reciprocal Rank Fusion — merges two ranked lists without score calibration.
+///
+/// RRF score = Σ 1/(k + rank_i) where k=60 is the standard smoothing constant.
+/// Scores are normalized to [0, 1] relative to the best hit so they compose
+/// correctly with the confidence term in `combined_score`.
+/// Higher score = better. Entities appearing in both lists are rewarded.
+fn rrf_fuse(
+    fts_hits: &[(Uuid, f32)],
+    vector_hits: &[(Uuid, f32)],
+) -> Vec<(Uuid, f64)> {
+    const K: f64 = 60.0;
+    let mut scores: HashMap<Uuid, f64> = HashMap::new();
+
+    for (rank, (id, _)) in fts_hits.iter().enumerate() {
+        *scores.entry(*id).or_insert(0.0) += 1.0 / (K + rank as f64 + 1.0);
+    }
+    for (rank, (id, _)) in vector_hits.iter().enumerate() {
+        *scores.entry(*id).or_insert(0.0) += 1.0 / (K + rank as f64 + 1.0);
+    }
+
+    let mut fused: Vec<(Uuid, f64)> = scores.into_iter().collect();
+    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Normalize to [0, 1] so scores compose correctly with the confidence term
+    if let Some(&(_, max)) = fused.first() {
+        if max > 0.0 {
+            for (_, s) in &mut fused {
+                *s /= max;
+            }
+        }
+    }
+
+    fused
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rrf_rewards_overlap() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+
+        // a appears in both lists at rank 0; b only in fts; c only in vector
+        let fts = vec![(a, 1.0f32), (b, 0.8f32)];
+        let vec = vec![(a, 1.0f32), (c, 0.8f32)];
+
+        let fused = rrf_fuse(&fts, &vec);
+        let score_of = |id: Uuid| fused.iter().find(|(i, _)| *i == id).map(|(_, s)| *s).unwrap_or(0.0);
+
+        // a appears in both lists — must outscore b and c which appear in only one
+        assert!(score_of(a) > score_of(b), "overlap should boost a above b");
+        assert!(score_of(a) > score_of(c), "overlap should boost a above c");
+    }
+
+    #[test]
+    fn rrf_empty_lists() {
+        let fused = rrf_fuse(&[], &[]);
+        assert!(fused.is_empty());
     }
 }
