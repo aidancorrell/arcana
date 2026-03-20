@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{Row, SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions}};
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::entities::{
@@ -22,9 +23,13 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open (or create) a SQLite database at the given URL and run migrations.
     pub async fn open(database_url: &str) -> Result<Self> {
+        let opts = SqliteConnectOptions::from_str(database_url)
+            .context("invalid database URL")?
+            .journal_mode(SqliteJournalMode::Wal)
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(database_url)
+            .connect_with(opts)
             .await?;
 
         sqlx::migrate!("src/store/migrations").run(&pool).await?;
@@ -628,6 +633,64 @@ impl MetadataStore for SqliteStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_semantic_definition).collect()
+    }
+
+    async fn list_all_semantic_definitions(&self) -> Result<Vec<SemanticDefinition>> {
+        let rows = sqlx::query(
+            "SELECT * FROM semantic_definitions ORDER BY confidence DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_semantic_definition).collect()
+    }
+
+    async fn fts_search(&self, query: &str, limit: u32) -> Result<Vec<(Uuid, f32)>> {
+        // FTS5 rank is negative BM25 (more negative = better). We flip the sign
+        // and normalize to [0, 1] relative to the best hit in this result set.
+        //
+        // Sanitize query: FTS5 MATCH syntax reserves chars like ?,*,^,",( etc.
+        // Strip anything that isn't alphanumeric, whitespace, or a hyphen.
+        let sanitized: String = query
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c.is_whitespace() { c } else { ' ' })
+            .collect();
+        let sanitized = sanitized.trim();
+
+        if sanitized.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows = sqlx::query(
+            "SELECT entity_id, rank FROM semantic_definitions_fts \
+             WHERE definition MATCH ? ORDER BY rank LIMIT ?",
+        )
+        .bind(sanitized)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results: Vec<(Uuid, f32)> = rows
+            .iter()
+            .map(|row| {
+                let entity_id: String = row.get("entity_id");
+                let rank: f64 = row.get("rank");
+                let uuid = parse_uuid(&entity_id)?;
+                Ok((uuid, (-rank) as f32))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Normalize scores to [0, 1]
+        if let Some(&(_, max_score)) = results.iter().max_by(|a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            if max_score > 0.0 {
+                for (_, score) in &mut results {
+                    *score /= max_score;
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     // --- Metric ---
