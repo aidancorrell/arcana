@@ -1093,7 +1093,8 @@ fn build_enrichment_provider(
         .anthropic_api_key
         .clone()
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .context("Anthropic API key required — set enrichment.anthropic_api_key in config or ANTHROPIC_API_KEY env var")?;
+        .or_else(|| std::env::var("ANTHROPIC_ARCANA_KEY").ok())
+        .context("Anthropic API key required — set enrichment.anthropic_api_key in config or ANTHROPIC_API_KEY / ANTHROPIC_ARCANA_KEY env var")?;
 
     let model = cfg
         .enrichment
