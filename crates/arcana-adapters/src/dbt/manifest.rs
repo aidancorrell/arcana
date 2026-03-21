@@ -12,6 +12,11 @@ use arcana_core::entities::{
 
 use crate::adapter::SyncOutput;
 
+/// Generate a deterministic UUID v5 from data_source_id namespace and natural key.
+fn deterministic_id(data_source_id: Uuid, key: &str) -> Uuid {
+    Uuid::new_v5(&data_source_id, key.as_bytes())
+}
+
 /// Subset of dbt manifest.json schema used by Arcana.
 /// Full spec: https://schemas.getdbt.com/dbt/manifest/
 #[derive(Debug, Deserialize)]
@@ -158,7 +163,7 @@ pub async fn parse_manifest_incremental(
         };
 
         let now = Utc::now();
-        let table_id = Uuid::new_v4();
+        let table_id = deterministic_id(data_source_id, &format!("table:{}", node.unique_id));
         table_id_by_unique_id.insert(node.unique_id.clone(), table_id);
 
         let table = Table {
@@ -184,7 +189,7 @@ pub async fn parse_manifest_incremental(
         if let Some(desc) = &node.description {
             if !desc.is_empty() {
                 output.semantic_definitions.push(SemanticDefinition {
-                    id: Uuid::new_v4(),
+                    id: deterministic_id(data_source_id, &format!("def:table:{}", node.unique_id)),
                     entity_id: table_id,
                     entity_type: SemanticEntityType::Table,
                     definition: desc.clone(),
@@ -200,7 +205,7 @@ pub async fn parse_manifest_incremental(
         }
 
         // Process columns
-        process_columns(&node.columns, table_id, &mut output);
+        process_columns(&node.columns, table_id, data_source_id, &mut output);
 
     }
 
@@ -224,7 +229,7 @@ pub async fn parse_manifest_incremental(
         );
 
         let now = Utc::now();
-        let table_id = Uuid::new_v4();
+        let table_id = deterministic_id(data_source_id, &format!("table:{}", source.unique_id));
         table_id_by_unique_id.insert(source.unique_id.clone(), table_id);
 
         let table = Table {
@@ -250,7 +255,7 @@ pub async fn parse_manifest_incremental(
         if let Some(desc) = &source.description {
             if !desc.is_empty() {
                 output.semantic_definitions.push(SemanticDefinition {
-                    id: Uuid::new_v4(),
+                    id: deterministic_id(data_source_id, &format!("def:table:{}", source.unique_id)),
                     entity_id: table_id,
                     entity_type: SemanticEntityType::Table,
                     definition: desc.clone(),
@@ -266,7 +271,7 @@ pub async fn parse_manifest_incremental(
         }
 
         // Process columns
-        process_columns(&source.columns, table_id, &mut output);
+        process_columns(&source.columns, table_id, data_source_id, &mut output);
     }
 
     // Resolve lineage edges now that all table IDs are known
@@ -282,7 +287,7 @@ pub async fn parse_manifest_incremental(
                 if let Some(&upstream_id) = table_id_by_unique_id.get(upstream_unique_id) {
                     let now = Utc::now();
                     output.lineage_edges.push(LineageEdge {
-                        id: Uuid::new_v4(),
+                        id: deterministic_id(data_source_id, &format!("edge:{upstream_id}:{downstream_id}")),
                         upstream_id,
                         upstream_type: LineageNodeType::Table,
                         downstream_id,
@@ -325,7 +330,7 @@ fn get_or_create_schema(
     }
 
     let now = Utc::now();
-    let schema_id = Uuid::new_v4();
+    let schema_id = deterministic_id(data_source_id, &format!("schema:{database}:{schema_name}"));
     schema_map.insert(key, schema_id);
 
     output.schemas.push(Schema {
@@ -345,11 +350,12 @@ fn get_or_create_schema(
 fn process_columns(
     columns: &HashMap<String, DbtColumnDef>,
     table_id: Uuid,
+    data_source_id: Uuid,
     output: &mut SyncOutput,
 ) {
     let now = Utc::now();
     for (i, (_, col_def)) in columns.iter().enumerate() {
-        let col_id = Uuid::new_v4();
+        let col_id = deterministic_id(data_source_id, &format!("col:{table_id}:{}", col_def.name));
 
         output.columns.push(Column {
             id: col_id,
@@ -374,7 +380,7 @@ fn process_columns(
         if let Some(desc) = &col_def.description {
             if !desc.is_empty() {
                 output.semantic_definitions.push(SemanticDefinition {
-                    id: Uuid::new_v4(),
+                    id: deterministic_id(data_source_id, &format!("def:col:{table_id}:{}", col_def.name)),
                     entity_id: col_id,
                     entity_type: SemanticEntityType::Column,
                     definition: desc.clone(),
