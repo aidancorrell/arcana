@@ -1,0 +1,21 @@
+services:
+  arcana:
+    build: .
+    ports:
+      - "8477:8477"
+    volumes:
+      - arcana-data:/data
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_ARCANA_KEY=${ANTHROPIC_ARCANA_KEY:-}
+    configs:
+      - source: arcana-config
+        target: /data/arcana.toml
+
+configs:
+  arcana-config:
+    file: ./arcana.docker.toml
+
+volumes:
+  arcana-data:

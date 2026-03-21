@@ -40,9 +40,19 @@ decay_rate_per_day = 0.02
 # Minimum confidence before a metric is flagged as stale
 stale_threshold = 0.4
 
+[enrichment]
+# Anthropic API key for `arcana enrich`. Falls back to ANTHROPIC_API_KEY env var.
+# anthropic_api_key = "sk-ant-..."
+# model = "claude-haiku-4-5-20251001"
+# batch_size = 20
+
+[index]
+# Path to persist the vector index on disk (skips SQLite warm on startup)
+# persist_path = "./arcana.idx"
+
 [mcp]
-# MCP server bind address
-bind_addr = "127.0.0.1:3000"
+# MCP server bind address (used by `arcana serve` without --stdio)
+bind_addr = "127.0.0.1:8477"
 # Max tokens to include in a single context response
 max_context_tokens = 8000
 
