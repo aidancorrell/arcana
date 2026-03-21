@@ -456,6 +456,7 @@ contact information and geographic region.
         query: "monthly revenue by region".into(),
         top_k: 5,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
     let context_output = handle_get_context(input, ranker.clone(), serializer.clone()).await.unwrap();
 
@@ -468,6 +469,7 @@ contact information and geographic region.
         top_k: 5,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
     let rank_result = ranker.rank(&request).await.unwrap();
     assert!(!rank_result.items.is_empty(), "Should find tables for 'orders placed by customers'");
@@ -552,6 +554,7 @@ contact information and geographic region.
         top_k: 3,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
 
     // Markdown

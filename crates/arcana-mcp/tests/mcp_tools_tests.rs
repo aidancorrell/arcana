@@ -55,7 +55,7 @@ fn now() -> chrono::DateTime<Utc> {
     Utc::now()
 }
 
-async fn setup() -> (Arc<SqliteStore>, Arc<RelevanceRanker>, Arc<ContextSerializer>) {
+async fn setup() -> (Arc<SqliteStore>, Arc<RelevanceRanker>, Arc<ContextSerializer>, Arc<VectorIndex>) {
     let store = Arc::new(SqliteStore::open("sqlite::memory:").await.unwrap());
     let provider = Arc::new(MockEmbeddingProvider);
     let entity_index = Arc::new(VectorIndex::new(16));
@@ -63,14 +63,14 @@ async fn setup() -> (Arc<SqliteStore>, Arc<RelevanceRanker>, Arc<ContextSerializ
     let ranker = Arc::new(RelevanceRanker::new(
         store.clone(),
         provider,
-        entity_index,
+        entity_index.clone(),
         chunk_index,
     ));
     let serializer = Arc::new(ContextSerializer {
         max_tokens: 8000,
         format: SerializationFormat::Markdown,
     });
-    (store, ranker, serializer)
+    (store, ranker, serializer, entity_index)
 }
 
 async fn seed_full_table(store: &SqliteStore) -> Table {
@@ -161,12 +161,13 @@ async fn seed_full_table(store: &SqliteStore) -> Table {
 
 #[tokio::test]
 async fn get_context_empty_index() {
-    let (_, ranker, serializer) = setup().await;
+    let (_, ranker, serializer, _) = setup().await;
 
     let input = GetContextInput {
         query: "monthly revenue".into(),
         top_k: 10,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
 
     let output = handle_get_context(input, ranker, serializer).await.unwrap();
@@ -176,12 +177,13 @@ async fn get_context_empty_index() {
 
 #[tokio::test]
 async fn get_context_with_min_confidence_filter() {
-    let (_, ranker, serializer) = setup().await;
+    let (_, ranker, serializer, _) = setup().await;
 
     let input = GetContextInput {
         query: "anything".into(),
         top_k: 10,
         min_confidence: 0.99, // Very high threshold
+        expand_lineage: false,
     };
 
     let output = handle_get_context(input, ranker, serializer).await.unwrap();
@@ -194,7 +196,7 @@ async fn get_context_with_min_confidence_filter() {
 
 #[tokio::test]
 async fn describe_table_by_name() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
     let table = seed_full_table(&store).await;
 
     let input = DescribeTableInput {
@@ -227,7 +229,7 @@ async fn describe_table_by_name() {
 
 #[tokio::test]
 async fn describe_table_by_uuid() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
     let table = seed_full_table(&store).await;
 
     let input = DescribeTableInput {
@@ -246,7 +248,7 @@ async fn describe_table_by_uuid() {
 
 #[tokio::test]
 async fn describe_table_not_found() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
 
     let input = DescribeTableInput {
         table_ref: "nonexistent_table".into(),
@@ -264,7 +266,7 @@ async fn describe_table_not_found() {
 
 #[tokio::test]
 async fn describe_table_without_columns() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
     seed_full_table(&store).await;
 
     let input = DescribeTableInput {
@@ -287,7 +289,7 @@ async fn describe_table_without_columns() {
 
 #[tokio::test]
 async fn update_context_creates_definition() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
     let entity_id = Uuid::new_v4();
 
     let input = UpdateContextInput {
@@ -313,7 +315,7 @@ async fn update_context_creates_definition() {
 
 #[tokio::test]
 async fn update_context_column_type() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
     let entity_id = Uuid::new_v4();
 
     let input = UpdateContextInput {
@@ -332,7 +334,7 @@ async fn update_context_column_type() {
 
 #[tokio::test]
 async fn update_context_metric_type() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
     let entity_id = Uuid::new_v4();
 
     let input = UpdateContextInput {
@@ -351,7 +353,7 @@ async fn update_context_metric_type() {
 
 #[tokio::test]
 async fn update_context_invalid_entity_type() {
-    let (store, _, _) = setup().await;
+    let (store, _, _, _) = setup().await;
 
     let input = UpdateContextInput {
         entity_id: Uuid::new_v4(),
@@ -392,9 +394,9 @@ async fn estimate_cost_no_snowflake_config() {
 
 #[tokio::test]
 async fn server_info_is_correct() {
-    let (store, ranker, serializer) = setup().await;
+    let (store, ranker, serializer, entity_index) = setup().await;
 
-    let server = arcana_mcp::ArcanaServer::new(store, ranker, serializer);
+    let server = arcana_mcp::ArcanaServer::new(store, ranker, serializer, entity_index);
 
     use rmcp::ServerHandler;
 

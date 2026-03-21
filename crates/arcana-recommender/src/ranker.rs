@@ -2,7 +2,7 @@ use anyhow::Result;
 use arcana_core::{
     confidence::ConfidenceDecay,
     embeddings::{EmbeddingProvider, VectorIndex},
-    entities::{Column, DocumentChunk, SemanticDefinition, Table},
+    entities::{Column, DocumentChunk, LineageEdge, SemanticDefinition, Table},
     store::MetadataStore,
 };
 use std::collections::{HashMap, HashSet};
@@ -20,6 +20,8 @@ pub struct ContextRequest {
     pub filter_table_id: Option<Uuid>,
     /// Minimum confidence score to include in results.
     pub min_confidence: f64,
+    /// Include upstream lineage tables in the context response.
+    pub expand_lineage: bool,
 }
 
 impl Default for ContextRequest {
@@ -29,6 +31,7 @@ impl Default for ContextRequest {
             top_k: 10,
             filter_table_id: None,
             min_confidence: 0.0,
+            expand_lineage: false,
         }
     }
 }
@@ -60,6 +63,8 @@ pub struct ContextResult {
     pub items: Vec<ContextItem>,
     /// Total tokens estimated for this context (rough: 1 token ≈ 4 chars).
     pub estimated_tokens: usize,
+    /// Lineage edges included when `expand_lineage` is true.
+    pub lineage_edges: Vec<LineageEdge>,
 }
 
 /// Scores and ranks metadata entities for relevance to an agent's query.
@@ -210,9 +215,63 @@ impl RelevanceRanker {
 
         let estimated_tokens = items.iter().map(|i| i.content.len() / 4 + 20).sum();
 
+        // 6. Lineage expansion: for each table hit, fetch upstream tables
+        let mut lineage_edges = Vec::new();
+        if request.expand_lineage {
+            let mut upstream_ids: HashSet<Uuid> = HashSet::new();
+            for item in &items {
+                if item.entity_type == ContextEntityType::Table {
+                    if let Ok(edges) = self.store.get_upstream(item.entity_id).await {
+                        for edge in &edges {
+                            upstream_ids.insert(edge.upstream_id);
+                        }
+                        lineage_edges.extend(edges);
+                    }
+                }
+            }
+
+            // Add upstream tables that aren't already in results (within token budget)
+            let existing_ids: HashSet<Uuid> = items.iter().map(|i| i.entity_id).collect();
+            for upstream_id in upstream_ids {
+                if existing_ids.contains(&upstream_id) {
+                    continue;
+                }
+                if let Ok(Some(table)) = self.store.get_table(upstream_id).await {
+                    let decayed = decay.decayed_score(table.confidence, table.confidence_refreshed_at);
+                    items.push(ContextItem {
+                        entity_id: table.id,
+                        entity_type: ContextEntityType::Table,
+                        relevance_score: 0.0, // lineage-injected, not search-ranked
+                        confidence: decayed.value(),
+                        label: format!("[upstream] {}", table.name),
+                        content: table.description.clone().unwrap_or_default(),
+                    });
+                }
+            }
+        }
+
+        // 7. Non-canonical warning: flag tables that belong to a cluster but aren't canonical
+        for item in &mut items {
+            if item.entity_type == ContextEntityType::Table {
+                if let Ok(Some((cluster, _members))) = self.store.get_cluster_for_table(item.entity_id).await {
+                    if let Some(canonical_id) = cluster.canonical_id {
+                        if canonical_id != item.entity_id {
+                            if let Ok(Some(canonical_table)) = self.store.get_table(canonical_id).await {
+                                item.label = format!(
+                                    "{} [⚠ non-canonical — prefer {}]",
+                                    item.label, canonical_table.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(ContextResult {
             items,
             estimated_tokens,
+            lineage_edges,
         })
     }
 

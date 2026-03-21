@@ -21,6 +21,9 @@ pub struct GetContextInput {
     /// Minimum confidence score to include (default: 0.0).
     #[serde(default)]
     pub min_confidence: f64,
+    /// Include upstream lineage tables in context (default: true).
+    #[serde(default = "default_true")]
+    pub expand_lineage: bool,
 }
 
 fn default_top_k() -> usize {
@@ -111,6 +114,41 @@ pub struct UpdateContextOutput {
     pub message: String,
 }
 
+/// Input for the `find_similar_tables` tool.
+#[derive(Debug, Deserialize)]
+pub struct FindSimilarTablesInput {
+    /// Table name or UUID to find similar tables for.
+    pub table_ref: String,
+    /// Similarity threshold (default: 0.85).
+    #[serde(default = "default_similarity_threshold")]
+    pub threshold: f64,
+    /// Maximum number of similar tables to return (default: 5).
+    #[serde(default = "default_similar_limit")]
+    pub limit: usize,
+}
+
+fn default_similarity_threshold() -> f64 {
+    0.85
+}
+
+fn default_similar_limit() -> usize {
+    5
+}
+
+#[derive(Debug, Serialize)]
+pub struct FindSimilarTablesOutput {
+    pub similar_tables: Vec<SimilarTableEntry>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarTableEntry {
+    pub table_id: Uuid,
+    pub table_name: String,
+    pub similarity: f64,
+    pub is_canonical: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Tool handler implementations
 // ---------------------------------------------------------------------------
@@ -126,6 +164,7 @@ pub async fn handle_get_context(
         top_k: input.top_k,
         min_confidence: input.min_confidence,
         filter_table_id: None,
+        expand_lineage: input.expand_lineage,
     };
 
     let result = ranker.rank(&request).await?;
@@ -245,5 +284,78 @@ pub async fn handle_update_context(
             "Semantic definition {} created for entity {}.",
             def.id, input.entity_id
         ),
+    })
+}
+
+/// Handles the `find_similar_tables` MCP tool.
+pub async fn handle_find_similar_tables(
+    input: FindSimilarTablesInput,
+    store: Arc<dyn MetadataStore>,
+    entity_index: Arc<arcana_core::embeddings::VectorIndex>,
+) -> Result<FindSimilarTablesOutput> {
+    // Resolve table by name or UUID
+    let table = if let Ok(id) = input.table_ref.parse::<Uuid>() {
+        store.get_table(id).await?
+    } else {
+        store
+            .search_tables(&input.table_ref, 1)
+            .await?
+            .into_iter()
+            .next()
+    };
+
+    let table = match table {
+        Some(t) => t,
+        None => {
+            return Ok(FindSimilarTablesOutput {
+                similar_tables: vec![],
+                message: format!("Table '{}' not found in Arcana.", input.table_ref),
+            });
+        }
+    };
+
+    let similar = arcana_recommender::dedup::find_similar_to(
+        table.id,
+        store.as_ref(),
+        &entity_index,
+        input.threshold,
+        input.limit,
+    )
+    .await?;
+
+    let mut entries = Vec::new();
+    for (sim_table, similarity) in &similar {
+        let is_canonical = if let Ok(Some((cluster, _))) =
+            store.get_cluster_for_table(sim_table.id).await
+        {
+            cluster.canonical_id == Some(sim_table.id)
+        } else {
+            true // no cluster = assumed canonical
+        };
+
+        entries.push(SimilarTableEntry {
+            table_id: sim_table.id,
+            table_name: sim_table.name.clone(),
+            similarity: *similarity,
+            is_canonical,
+        });
+    }
+
+    let message = if entries.is_empty() {
+        format!(
+            "No tables found similar to '{}' above threshold {:.2}.",
+            table.name, input.threshold
+        )
+    } else {
+        format!(
+            "Found {} table(s) similar to '{}'.",
+            entries.len(),
+            table.name
+        )
+    };
+
+    Ok(FindSimilarTablesOutput {
+        similar_tables: entries,
+        message,
     })
 }

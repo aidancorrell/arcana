@@ -112,6 +112,17 @@ enum Commands {
         #[arg(long, default_value = "20")]
         batch_size: usize,
     },
+
+    /// Detect redundant/duplicate tables by semantic similarity clustering.
+    Dedup {
+        /// Cosine similarity threshold for grouping tables (default: 0.92).
+        #[arg(long, default_value = "0.92")]
+        threshold: f64,
+
+        /// Preview clusters without persisting to the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +257,9 @@ async fn main() -> Result<()> {
         }
         Commands::Enrich { dry_run, filter, batch_size } => {
             cmd_enrich(&cfg, dry_run, filter.as_deref(), batch_size).await
+        }
+        Commands::Dedup { threshold, dry_run } => {
+            cmd_dedup(&cfg, threshold, dry_run).await
         }
     }
 }
@@ -444,7 +458,7 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
     let ranker = Arc::new(arcana_recommender::RelevanceRanker::new(
         store.clone(),
         embedding_provider,
-        entity_index,
+        entity_index.clone(),
         chunk_index,
     ));
 
@@ -453,7 +467,7 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
         ..Default::default()
     });
 
-    let mut server = arcana_mcp::ArcanaServer::new(store, ranker, serializer);
+    let mut server = arcana_mcp::ArcanaServer::new(store, ranker, serializer, entity_index);
 
     // Attach Snowflake config if present (enables estimate_cost tool)
     if let Some(sf_cfg) = &cfg.snowflake {
@@ -510,6 +524,7 @@ async fn cmd_ask(cfg: &AppConfig, query: &str, top_k: usize, format: &str) -> Re
         top_k,
         filter_table_id: None,
         min_confidence: 0.0,
+        expand_lineage: false,
     };
 
     let result = ranker.rank(&request).await?;
@@ -910,6 +925,88 @@ fn build_embedding_provider(
     Ok(Arc::new(arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
         api_key, model, dimensions,
     )))
+}
+
+async fn cmd_dedup(cfg: &AppConfig, threshold: f64, dry_run: bool) -> Result<()> {
+    let store: Arc<dyn MetadataStore> =
+        Arc::new(arcana_core::store::sqlite::SqliteStore::open(&cfg.database.url).await?);
+
+    let dimensions = cfg.embeddings.dimensions.unwrap_or(1536);
+    let entity_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
+
+    // Warm the index from stored embeddings
+    let all_defs = store.list_all_semantic_definitions().await?;
+    for def in &all_defs {
+        if let Some(emb) = &def.embedding {
+            entity_index.upsert(def.entity_id, emb.clone())?;
+        }
+    }
+
+    println!(
+        "Searching for duplicate tables (threshold: {:.2}, {} embeddings loaded)...",
+        threshold,
+        entity_index.len()
+    );
+
+    let clusters =
+        arcana_recommender::dedup::find_clusters(store.as_ref(), &entity_index, threshold).await?;
+
+    if clusters.is_empty() {
+        println!("No duplicate clusters found at threshold {:.2}.", threshold);
+        return Ok(());
+    }
+
+    println!("Found {} cluster(s):\n", clusters.len());
+
+    for (i, cluster) in clusters.iter().enumerate() {
+        println!("--- Cluster {} ({} tables) ---", i + 1, cluster.tables.len());
+        for (table, sim) in &cluster.tables {
+            let canonical_marker = if table.id == cluster.suggested_canonical {
+                " [canonical]"
+            } else {
+                ""
+            };
+            println!(
+                "  {} (similarity: {:.3}, confidence: {:.2}){}",
+                table.name, sim, table.confidence, canonical_marker
+            );
+        }
+        println!();
+    }
+
+    if dry_run {
+        println!("Dry run — no changes persisted.");
+        return Ok(());
+    }
+
+    // Persist clusters to the store
+    store.clear_table_clusters().await?;
+    for cluster in &clusters {
+        let tc = arcana_core::entities::TableCluster {
+            id: uuid::Uuid::new_v4(),
+            label: None,
+            canonical_id: Some(cluster.suggested_canonical),
+            threshold,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        store.upsert_table_cluster(&tc).await?;
+
+        for (table, sim) in &cluster.tables {
+            let member = arcana_core::entities::TableClusterMember {
+                cluster_id: tc.id,
+                table_id: table.id,
+                similarity: *sim,
+            };
+            store.upsert_cluster_member(&member).await?;
+        }
+    }
+
+    println!(
+        "Persisted {} cluster(s) to the store. Non-canonical tables will show warnings in get_context.",
+        clusters.len()
+    );
+    Ok(())
 }
 
 fn build_enrichment_provider(
