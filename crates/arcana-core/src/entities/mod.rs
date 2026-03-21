@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod column;
+pub mod evidence;
 pub mod contract;
 pub mod document;
 pub mod lineage;
@@ -8,6 +9,7 @@ pub mod table;
 pub mod usage;
 
 pub use cluster::{TableCluster, TableClusterMember};
+pub use evidence::{EvidenceOutcome, EvidenceRecord, EvidenceSource};
 pub use column::{Column, ColumnProfile};
 pub use contract::{ContractEntityType, ContractResult, ContractStatus, ContractType, DataContract};
 pub use document::{Document, DocumentChunk, DocumentSourceType, EntityLink, LinkedEntityType, LinkMethod};

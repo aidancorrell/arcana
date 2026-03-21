@@ -16,8 +16,8 @@ use std::sync::Arc;
 use arcana_core::embeddings::VectorIndex;
 use crate::tools::{
     DescribeTableInput, EstimateCostInput, FindSimilarTablesInput, GetContextInput,
-    UpdateContextInput, handle_describe_table, handle_estimate_cost, handle_find_similar_tables,
-    handle_get_context, handle_update_context,
+    ReportOutcomeInput, UpdateContextInput, handle_describe_table, handle_estimate_cost,
+    handle_find_similar_tables, handle_get_context, handle_report_outcome, handle_update_context,
 };
 
 /// The Arcana MCP server — exposes metadata context to AI agents via the Model Context Protocol.
@@ -151,6 +151,35 @@ impl ArcanaServer {
                     .unwrap(),
                 ),
             },
+            Tool {
+                name: "report_outcome".into(),
+                description: "Report whether a query using Arcana context succeeded or failed. \
+                     Boosts or reduces confidence on the entities that were in the context."
+                    .into(),
+                input_schema: Arc::new(
+                    serde_json::from_value(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "entity_ids": {
+                                "type": "array",
+                                "items": {"type": "string", "format": "uuid"},
+                                "description": "Entity IDs that were in the context"
+                            },
+                            "outcome": {
+                                "type": "string",
+                                "enum": ["success", "failure"],
+                                "description": "Whether the query succeeded or failed"
+                            },
+                            "query_text": {
+                                "type": "string",
+                                "description": "The SQL query that was executed (optional)"
+                            }
+                        },
+                        "required": ["entity_ids", "outcome"]
+                    }))
+                    .unwrap(),
+                ),
+            },
         ]
     }
 }
@@ -248,6 +277,16 @@ impl ServerHandler for ArcanaServer {
                         ))
                         .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
                     handle_find_similar_tables(input, store, entity_index)
+                        .await
+                        .map(|o| serde_json::to_string_pretty(&o).unwrap_or_default())
+                }
+                "report_outcome" => {
+                    let input: ReportOutcomeInput =
+                        serde_json::from_value(Value::Object(
+                            request.arguments.unwrap_or_default(),
+                        ))
+                        .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
+                    handle_report_outcome(input, store)
                         .await
                         .map(|o| serde_json::to_string_pretty(&o).unwrap_or_default())
                 }
