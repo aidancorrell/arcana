@@ -174,7 +174,7 @@ struct McpConfig {
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:3000".to_string(),
+            bind_addr: "127.0.0.1:8477".to_string(),
             max_context_tokens: 8000,
         }
     }

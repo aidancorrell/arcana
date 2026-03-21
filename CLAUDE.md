@@ -19,6 +19,9 @@ crates/
   arcana-integration-tests/ # MVP end-to-end test suite (101 tests)
 config/
   arcana.example.toml
+Dockerfile                    # Multi-stage build (rust builder → debian slim runtime)
+docker-compose.yml            # One-command deployment with volume + config
+arcana.docker.toml            # Docker-optimized config template
 sandbox/
   README.md                 # Instructions for local end-to-end testing (committed)
   setup.sh                  # Bootstrap script: clones jaffle-shop, generates dbt artifacts, inits store (committed)
@@ -219,7 +222,7 @@ The MVP and scale phases prove Arcana works. The deployment roadmap takes it fro
 
 ---
 
-### Phase H — HTTP/SSE MCP Transport (Multi-User Server)  ⬜ IN PROGRESS
+### Phase H — HTTP/SSE MCP Transport (Multi-User Server)  ✅ COMPLETE
 
 **Problem:** Stdio transport means each user runs their own Arcana process with their own metadata copy. No shared state, no shared feedback loop, no centralized management.
 
@@ -257,34 +260,29 @@ api_keys = ["arcana-team-key-1"]  # optional; if empty, no auth required
 
 ---
 
-### Phase I — Docker Packaging & Deployment  ⬜ TODO
+### Phase I — Docker Packaging & Deployment  ✅ COMPLETE
 
-**Problem:** Installing Rust, building from source, and managing config files is a barrier for platform teams that just want to run a service.
+Multi-stage Docker build producing a minimal container image.
 
-**Solution:** Multi-stage Docker build producing a minimal container image.
+- `Dockerfile` — two-stage build: `rust:1.82-slim-bookworm` builder (with dependency caching layer) → `debian:bookworm-slim` runtime with `ca-certificates`, `libssl3`, `curl`.
+- `docker-compose.yml` — Arcana server with named volume (`arcana-data`) for SQLite DB + index. API keys passed via environment. Config injected via Docker configs.
+- `arcana.docker.toml` — Docker-optimized config template: SQLite at `/data/arcana.db`, index at `/data/arcana.idx`, binds `0.0.0.0:8477`, dbt project mountable at `/dbt`.
+- `.dockerignore` — excludes `target/`, `.git/`, `sandbox/`, secrets.
+- Non-root `arcana` user in container. Health check via `curl` to SSE endpoint.
+- `ENTRYPOINT ["arcana"]`, `CMD ["--config", "/data/arcana.toml", "serve"]`.
 
-**Implementation:**
-- `Dockerfile` — multi-stage: `rust:1.82-slim` builder → `debian:bookworm-slim` runtime.
-- `docker-compose.yml` — Arcana server + volume for SQLite DB + optional Postgres sidecar.
-- Config via environment variables: `ARCANA_DATABASE_URL`, `ARCANA_OPENAI_API_KEY`, `ARCANA_ANTHROPIC_API_KEY`, `ARCANA_MCP_BIND_ADDR`.
-- `ENTRYPOINT ["arcana", "serve"]` — starts HTTP MCP server by default.
-- Health check: `HEALTHCHECK CMD curl -f http://localhost:8477/health`.
-- Published to GitHub Container Registry: `ghcr.io/aidancorrell/arcana:latest`.
-
-**Deployment patterns:**
+**Deployment:**
 ```bash
 # Quickstart
 docker run -p 8477:8477 \
   -v arcana-data:/data \
-  -e ARCANA_DATABASE_URL=sqlite:///data/arcana.db \
   -e OPENAI_API_KEY=sk-... \
-  ghcr.io/aidancorrell/arcana:latest
+  arcana:latest
 
-# With docker-compose (includes scheduled sync)
+# With docker-compose
+cp arcana.docker.toml arcana.toml  # customize if needed
 docker compose up -d
 ```
-
-**Success metric:** Platform engineer deploys Arcana in under 5 minutes with `docker compose up`.
 
 ---
 
@@ -336,8 +334,8 @@ webhook_secret = "whsec_..."  # for dbt Cloud webhook validation
 
 | Phase | What | Unlocks | Status |
 |-------|------|---------|--------|
-| H — HTTP Transport | Multi-user MCP server | Shared team deployment | ⬜ In Progress |
-| I — Docker | Container image + compose | Easy deployment | ⬜ TODO |
+| H — HTTP Transport | Multi-user MCP server | Shared team deployment | ✅ Done |
+| I — Docker | Container image + compose | Easy deployment | ✅ Done |
 | J — CI/CD | Auto-sync on dbt changes | Always-fresh metadata | ⬜ TODO |
 | K — Observability | Admin API + metrics | Operational visibility | ⬜ TODO |
 
