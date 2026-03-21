@@ -8,9 +8,11 @@ use rmcp::{
         PaginatedRequestParam, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
+    transport::SseServer,
     RoleServer,
 };
 use serde_json::Value;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arcana_core::embeddings::VectorIndex;
@@ -58,6 +60,42 @@ impl ArcanaServer {
             .await
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Start the MCP server over HTTP+SSE transport (multi-user mode).
+    ///
+    /// Clients connect via `GET /sse` for server-sent events and `POST /message`
+    /// to send requests. Each SSE connection gets its own MCP session sharing
+    /// the same underlying store and index.
+    pub async fn serve_http(self, bind_addr: &str) -> Result<()> {
+        let addr: SocketAddr = bind_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid bind address '{bind_addr}': {e}"))?;
+
+        tracing::info!(%addr, "starting MCP SSE server");
+
+        let sse_server = SseServer::serve(addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to bind SSE server on {addr}: {e}"))?;
+
+        let ct = sse_server.config.ct.clone();
+        let server = self;
+        let _ct = sse_server.with_service(move || server.clone());
+
+        // Log connection info
+        eprintln!("Arcana MCP server listening on {addr}");
+        eprintln!("  SSE endpoint:     http://{addr}/sse");
+        eprintln!("  Message endpoint: http://{addr}/message");
+
+        // Block until ctrl-c
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|e| anyhow::anyhow!("signal error: {e}"))?;
+
+        tracing::info!("shutting down MCP server");
+        ct.cancel();
+
+        Ok(())
     }
 
     fn tool_list() -> Vec<Tool> {
