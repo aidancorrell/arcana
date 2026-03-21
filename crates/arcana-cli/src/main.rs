@@ -174,7 +174,7 @@ struct McpConfig {
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:3000".to_string(),
+            bind_addr: "127.0.0.1:8477".to_string(),
             max_context_tokens: 8000,
         }
     }
@@ -516,9 +516,15 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
         result
     } else {
         let bind_addr = bind_override.unwrap_or(&cfg.mcp.bind_addr);
-        anyhow::bail!(
-            "TCP MCP server not yet supported. Use --stdio for Claude Desktop integration. (bind_addr: {bind_addr})"
-        );
+        let result = server.serve_http(bind_addr).await;
+        // Save index to disk on shutdown if persist_path is configured
+        if let Some(persist_path) = &cfg.index.persist_path {
+            let path = std::path::Path::new(persist_path);
+            if let Err(e) = entity_index.save(path) {
+                tracing::warn!("Failed to persist index: {e}");
+            }
+        }
+        result
     }
 }
 

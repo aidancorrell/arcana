@@ -24,7 +24,8 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 clap = { version = "=4.5.38", features = ["derive"] }
 reqwest = { version = "=0.12.15", features = ["json"] }
 config = "0.14"
-rmcp = { version = "0.1", features = ["server"] }
+rmcp = { version = "0.1", features = ["server", "transport-sse-server"] }
+axum = "0.8"
 sha2 = "0.10"
 bincode = "1"
 regex = "1"
