@@ -149,6 +149,25 @@ pub struct SimilarTableEntry {
     pub is_canonical: bool,
 }
 
+/// Input for the `report_outcome` tool.
+#[derive(Debug, Deserialize)]
+pub struct ReportOutcomeInput {
+    /// Entity IDs that were in the context when the query was executed.
+    pub entity_ids: Vec<Uuid>,
+    /// Whether the query succeeded or failed.
+    pub outcome: String,
+    /// The SQL query that was executed (optional, for evidence tracking).
+    #[serde(default)]
+    pub query_text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReportOutcomeOutput {
+    pub success: bool,
+    pub entities_boosted: usize,
+    pub message: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tool handler implementations
 // ---------------------------------------------------------------------------
@@ -271,6 +290,7 @@ pub async fn handle_update_context(
         confidence: input.confidence,
         confidence_refreshed_at: Some(now),
         embedding: None,
+        definition_hash: None,
         created_at: now,
         updated_at: now,
     };
@@ -357,5 +377,52 @@ pub async fn handle_find_similar_tables(
     Ok(FindSimilarTablesOutput {
         similar_tables: entries,
         message,
+    })
+}
+
+/// Handles the `report_outcome` MCP tool — records feedback and boosts confidence.
+pub async fn handle_report_outcome(
+    input: ReportOutcomeInput,
+    store: Arc<dyn MetadataStore>,
+) -> Result<ReportOutcomeOutput> {
+    use arcana_core::entities::{EvidenceOutcome, EvidenceRecord, EvidenceSource};
+
+    let outcome = match input.outcome.as_str() {
+        "success" => EvidenceOutcome::Success,
+        "failure" => EvidenceOutcome::Failure,
+        other => anyhow::bail!("unknown outcome: {other} (expected 'success' or 'failure')"),
+    };
+
+    let delta = match outcome {
+        EvidenceOutcome::Success => 0.05,
+        EvidenceOutcome::Failure => -0.03,
+    };
+
+    let mut boosted = 0usize;
+    for entity_id in &input.entity_ids {
+        let record = EvidenceRecord {
+            id: Uuid::new_v4(),
+            entity_id: *entity_id,
+            interaction_id: None,
+            query_text: input.query_text.clone(),
+            outcome,
+            source: EvidenceSource::AgentFeedback,
+            confidence_delta: delta,
+            created_at: chrono::Utc::now(),
+        };
+        store.insert_evidence_record(&record).await?;
+        store.boost_confidence(*entity_id, delta).await?;
+        boosted += 1;
+    }
+
+    let direction = if delta > 0.0 { "boosted" } else { "reduced" };
+    Ok(ReportOutcomeOutput {
+        success: true,
+        entities_boosted: boosted,
+        message: format!(
+            "Confidence {direction} by {:.2} for {boosted} entit{}.",
+            delta.abs(),
+            if boosted == 1 { "y" } else { "ies" }
+        ),
     })
 }

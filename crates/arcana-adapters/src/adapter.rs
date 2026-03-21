@@ -12,6 +12,8 @@ pub struct SyncOutput {
     pub semantic_definitions: Vec<SemanticDefinition>,
     pub metrics: Vec<Metric>,
     pub stats: SyncStats,
+    /// Changed checksums from incremental sync: (entity_key, new_checksum).
+    pub changed_checksums: Vec<(String, String)>,
 }
 
 /// Counts of entities synced (for reporting).

@@ -48,6 +48,14 @@ pub struct DbtNode {
     pub tags: Vec<String>,
     pub config: Option<serde_json::Value>,
     pub meta: Option<serde_json::Value>,
+    /// Checksum of the model SQL (used for incremental sync).
+    pub checksum: Option<DbtChecksum>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbtChecksum {
+    pub name: Option<String>,
+    pub checksum: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +90,16 @@ pub struct DbtDependsOn {
 
 /// Parse manifest.json and extract tables, columns, semantic definitions, and lineage edges.
 pub async fn parse_manifest(manifest_path: &Path, data_source_id: Uuid) -> Result<SyncOutput> {
+    parse_manifest_incremental(manifest_path, data_source_id, &HashMap::new()).await
+}
+
+/// Incremental parse: skips nodes whose checksum matches `known_checksums`.
+/// Returns `(SyncOutput, changed_checksums)` where changed_checksums maps unique_id → new checksum.
+pub async fn parse_manifest_incremental(
+    manifest_path: &Path,
+    data_source_id: Uuid,
+    known_checksums: &HashMap<String, String>,
+) -> Result<SyncOutput> {
     let raw = tokio::fs::read_to_string(manifest_path)
         .await
         .with_context(|| format!("failed to read manifest.json at {:?}", manifest_path))?;
@@ -97,10 +115,23 @@ pub async fn parse_manifest(manifest_path: &Path, data_source_id: Uuid) -> Resul
     // Track table IDs by unique_id so we can resolve lineage references
     let mut table_id_by_unique_id: HashMap<String, Uuid> = HashMap::new();
 
+    // Track which checksums changed (for incremental sync persistence)
+    let mut changed_checksums: Vec<(String, String)> = Vec::new();
+
     // Process nodes (models and snapshots)
     for (_, node) in &manifest.nodes {
         if node.resource_type != "model" && node.resource_type != "snapshot" {
             continue;
+        }
+
+        // Incremental sync: skip nodes whose checksum hasn't changed
+        if let Some(ck) = &node.checksum {
+            if let Some(known) = known_checksums.get(&node.unique_id) {
+                if known == &ck.checksum {
+                    continue;
+                }
+            }
+            changed_checksums.push((node.unique_id.clone(), ck.checksum.clone()));
         }
 
         let db = node.database.clone().unwrap_or_else(|| "default".to_string());
@@ -161,6 +192,7 @@ pub async fn parse_manifest(manifest_path: &Path, data_source_id: Uuid) -> Resul
                     confidence: 0.80,
                     confidence_refreshed_at: Some(now),
                     embedding: None,
+                    definition_hash: None,
                     created_at: now,
                     updated_at: now,
                 });
@@ -226,6 +258,7 @@ pub async fn parse_manifest(manifest_path: &Path, data_source_id: Uuid) -> Resul
                     confidence: 0.80,
                     confidence_refreshed_at: Some(now),
                     embedding: None,
+                    definition_hash: None,
                     created_at: now,
                     updated_at: now,
                 });
@@ -274,6 +307,7 @@ pub async fn parse_manifest(manifest_path: &Path, data_source_id: Uuid) -> Resul
         output.stats.lineage_edges_upserted,
     );
 
+    output.changed_checksums = changed_checksums;
     Ok(output)
 }
 
@@ -348,6 +382,7 @@ fn process_columns(
                     confidence: 0.80,
                     confidence_refreshed_at: Some(now),
                     embedding: None,
+                    definition_hash: None,
                     created_at: now,
                     updated_at: now,
                 });

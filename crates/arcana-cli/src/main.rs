@@ -137,6 +137,8 @@ struct AppConfig {
     #[serde(default)]
     enrichment: EnrichmentConfig,
     #[serde(default)]
+    index: IndexSectionConfig,
+    #[serde(default)]
     dbt: Option<DbtSectionConfig>,
     #[serde(default)]
     snowflake: Option<SnowflakeSectionConfig>,
@@ -195,6 +197,12 @@ struct SnowflakeSectionConfig {
     private_key_path: Option<String>,
     password: Option<String>,
     role: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct IndexSectionConfig {
+    /// Path to persist the vector index on disk (default: none — warm from SQLite each time).
+    persist_path: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -339,18 +347,46 @@ async fn cmd_sync(cfg: &AppConfig, adapter_filter: Option<&str>, full: bool) -> 
                 adapter_cfg.catalog_path = cp.clone();
             }
 
-            let adapter = arcana_adapters::dbt::DbtAdapter::new(adapter_cfg);
-            let output = adapter.sync().await?;
+            let output = if full {
+                let adapter = arcana_adapters::dbt::DbtAdapter::new(adapter_cfg);
+                adapter.sync().await?
+            } else {
+                // Incremental sync: load known checksums, skip unchanged models
+                let known: std::collections::HashMap<String, String> = store
+                    .list_sync_checksums("dbt")
+                    .await?
+                    .into_iter()
+                    .collect();
+                let manifest_path = std::path::Path::new(&adapter_cfg.manifest_path);
+                arcana_adapters::dbt::manifest::parse_manifest_incremental(
+                    manifest_path,
+                    ds_id,
+                    &known,
+                )
+                .await?
+            };
 
             upsert_sync_output(&*store, &output).await?;
+
+            // Persist changed checksums for next incremental run
+            for (key, checksum) in &output.changed_checksums {
+                store.upsert_sync_checksum("dbt", key, checksum).await?;
+            }
+
+            let skipped_note = if !full && output.changed_checksums.len() < output.tables.len() {
+                " (incremental)"
+            } else {
+                ""
+            };
             total_tables += output.tables.len();
             total_columns += output.columns.len();
             println!(
-                "    dbt: {} schemas, {} tables, {} columns, {} definitions",
+                "    dbt: {} schemas, {} tables, {} columns, {} definitions{}",
                 output.schemas.len(),
                 output.tables.len(),
                 output.columns.len(),
-                output.semantic_definitions.len()
+                output.semantic_definitions.len(),
+                skipped_note
             );
         } else if adapter_filter == Some("dbt") {
             anyhow::bail!("dbt adapter requested but [dbt] section not found in config");
@@ -444,16 +480,9 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
     let embedding_provider = build_embedding_provider(cfg)?;
     let dimensions = cfg.embeddings.dimensions.unwrap_or(1536);
 
-    let entity_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
+    let entity_index = load_or_warm_index(cfg, &*store, dimensions).await?;
+    let entity_index = Arc::new(entity_index);
     let chunk_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
-
-    // Warm the in-memory index from stored embeddings
-    let all_defs = store.list_all_semantic_definitions().await?;
-    for def in &all_defs {
-        if let Some(emb) = &def.embedding {
-            entity_index.upsert(def.entity_id, emb.clone())?;
-        }
-    }
 
     let ranker = Arc::new(arcana_recommender::RelevanceRanker::new(
         store.clone(),
@@ -467,7 +496,7 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
         ..Default::default()
     });
 
-    let mut server = arcana_mcp::ArcanaServer::new(store, ranker, serializer, entity_index);
+    let mut server = arcana_mcp::ArcanaServer::new(store, ranker, serializer, entity_index.clone());
 
     // Attach Snowflake config if present (enables estimate_cost tool)
     if let Some(sf_cfg) = &cfg.snowflake {
@@ -476,7 +505,15 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
 
     if stdio {
         println!("Starting Arcana MCP server on stdio...");
-        server.serve_stdio().await
+        let result = server.serve_stdio().await;
+        // Save index to disk on shutdown if persist_path is configured
+        if let Some(persist_path) = &cfg.index.persist_path {
+            let path = std::path::Path::new(persist_path);
+            if let Err(e) = entity_index.save(path) {
+                tracing::warn!("Failed to persist index: {e}");
+            }
+        }
+        result
     } else {
         let bind_addr = bind_override.unwrap_or(&cfg.mcp.bind_addr);
         anyhow::bail!(
@@ -490,16 +527,8 @@ async fn cmd_ask(cfg: &AppConfig, query: &str, top_k: usize, format: &str) -> Re
     let embedding_provider = build_embedding_provider(cfg)?;
     let dimensions = cfg.embeddings.dimensions.unwrap_or(1536);
 
-    let entity_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
+    let entity_index = Arc::new(load_or_warm_index(cfg, &*store, dimensions).await?);
     let chunk_index = Arc::new(arcana_core::embeddings::VectorIndex::new(dimensions));
-
-    // Warm the in-memory index from stored embeddings
-    let all_defs = store.list_all_semantic_definitions().await?;
-    for def in &all_defs {
-        if let Some(emb) = &def.embedding {
-            entity_index.upsert(def.entity_id, emb.clone())?;
-        }
-    }
 
     let ranker = arcana_recommender::RelevanceRanker::new(
         store,
@@ -604,6 +633,13 @@ async fn cmd_reembed(
 
                 for def in defs {
                     if def.confidence < threshold {
+                        // Embedding cache: skip if definition text unchanged and embedding exists
+                        let hash = arcana_core::definition_hash(&def.definition);
+                        if def.embedding.is_some()
+                            && def.definition_hash.as_deref() == Some(hash.as_str())
+                        {
+                            continue;
+                        }
                         batch_texts.push(def.definition.clone());
                         batch_defs.push(def);
                     }
@@ -616,6 +652,7 @@ async fn cmd_reembed(
                             batch_defs.drain(..).zip(embeddings.into_iter())
                         {
                             d.embedding = Some(emb);
+                            d.definition_hash = Some(arcana_core::definition_hash(&d.definition));
                             store.upsert_semantic_definition(&d).await?;
                             def_count += 1;
                         }
@@ -629,6 +666,7 @@ async fn cmd_reembed(
                     let embeddings = embedding_provider.embed_batch(&refs).await?;
                     for (mut d, emb) in batch_defs.drain(..).zip(embeddings.into_iter()) {
                         d.embedding = Some(emb);
+                        d.definition_hash = Some(arcana_core::definition_hash(&d.definition));
                         store.upsert_semantic_definition(&d).await?;
                         def_count += 1;
                     }
@@ -882,6 +920,7 @@ async fn flush_enrichment_batch(
                 source: DefinitionSource::LlmInferred,
                 confidence: 0.40,
                 embedding: None,
+                definition_hash: None,
                 confidence_refreshed_at: Some(chrono::Utc::now()),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -903,6 +942,43 @@ async fn open_store(cfg: &AppConfig) -> Result<arcana_core::store::SqliteStore> 
     arcana_core::store::SqliteStore::open(&cfg.database.url)
         .await
         .context("failed to open metadata store")
+}
+
+/// Load the vector index from disk if a persist_path is configured and the file exists,
+/// otherwise warm it from stored embeddings in SQLite.
+async fn load_or_warm_index(
+    cfg: &AppConfig,
+    store: &dyn arcana_core::store::MetadataStore,
+    dimensions: usize,
+) -> Result<arcana_core::embeddings::VectorIndex> {
+    if let Some(persist_path) = &cfg.index.persist_path {
+        let path = std::path::Path::new(persist_path);
+        if path.exists() {
+            match arcana_core::embeddings::VectorIndex::load(path) {
+                Ok(index) => {
+                    println!("Loaded index from {} ({} vectors).", persist_path, index.len());
+                    return Ok(index);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load persisted index, warming from SQLite: {e}");
+                }
+            }
+        }
+    }
+
+    let index = arcana_core::embeddings::VectorIndex::new(dimensions);
+    let all_defs = store.list_all_semantic_definitions().await?;
+    let mut count = 0usize;
+    for def in &all_defs {
+        if let Some(emb) = &def.embedding {
+            index.upsert(def.entity_id, emb.clone())?;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        println!("Warmed index from SQLite ({count} vectors).");
+    }
+    Ok(index)
 }
 
 fn build_embedding_provider(
