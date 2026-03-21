@@ -158,6 +158,7 @@ async fn simulate_dbt_sync(store: &SqliteStore) -> (Vec<Table>, Vec<Column>) {
             confidence: 0.80,
             confidence_refreshed_at: Some(now()),
             embedding: None,
+            definition_hash: None,
             created_at: now(),
             updated_at: now(),
         };

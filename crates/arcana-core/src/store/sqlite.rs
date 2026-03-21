@@ -8,10 +8,10 @@ use uuid::Uuid;
 use crate::entities::{
     AgentInteraction, Column, ColumnProfile, ContractEntityType, ContractResult, ContractStatus,
     ContractType, DataContract, DataSource, DataSourceType, Document, DocumentChunk,
-    DocumentSourceType, EntityLink, LineageEdge, LineageNodeType, LineageSource,
-    LinkedEntityType, LinkMethod, Metric, MetricType, QueryType, Schema, SemanticDefinition,
-    SemanticEntityType, DefinitionSource, Table, TableCluster, TableClusterMember, TableType,
-    UsageRecord,
+    DocumentSourceType, EntityLink, EvidenceOutcome, EvidenceRecord, EvidenceSource, LineageEdge,
+    LineageNodeType, LineageSource, LinkedEntityType, LinkMethod, Metric, MetricType, QueryType,
+    Schema, SemanticDefinition, SemanticEntityType, DefinitionSource, Table, TableCluster,
+    TableClusterMember, TableType, UsageRecord,
 };
 
 use super::MetadataStore;
@@ -173,6 +173,7 @@ fn row_to_semantic_definition(row: &sqlx::sqlite::SqliteRow) -> Result<SemanticD
         confidence: row.try_get("confidence")?,
         confidence_refreshed_at: row.try_get("confidence_refreshed_at")?,
         embedding: embedding.as_deref().map(serde_json::from_str).transpose()?,
+        definition_hash: row.try_get("definition_hash")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -599,15 +600,16 @@ impl MetadataStore for SqliteStore {
             r#"
             INSERT INTO semantic_definitions (
                 id, entity_id, entity_type, definition, source,
-                confidence, confidence_refreshed_at, embedding, created_at, updated_at
+                confidence, confidence_refreshed_at, embedding, definition_hash, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 definition = excluded.definition,
                 source = excluded.source,
                 confidence = excluded.confidence,
                 confidence_refreshed_at = excluded.confidence_refreshed_at,
                 embedding = excluded.embedding,
+                definition_hash = excluded.definition_hash,
                 updated_at = excluded.updated_at
             "#,
         )
@@ -619,6 +621,7 @@ impl MetadataStore for SqliteStore {
         .bind(def.confidence)
         .bind(def.confidence_refreshed_at)
         .bind(embedding)
+        .bind(&def.definition_hash)
         .bind(def.created_at)
         .bind(def.updated_at)
         .execute(&self.pool)
@@ -1142,6 +1145,113 @@ impl MetadataStore for SqliteStore {
             .await?;
         Ok(())
     }
+
+    // --- Evidence (feedback loop) ---
+
+    async fn insert_evidence_record(&self, record: &EvidenceRecord) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO evidence_records (id, entity_id, interaction_id, query_text, outcome, source, confidence_delta, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(record.id.to_string())
+        .bind(record.entity_id.to_string())
+        .bind(record.interaction_id.map(|id| id.to_string()))
+        .bind(&record.query_text)
+        .bind(record.outcome.as_str())
+        .bind(record.source.as_str())
+        .bind(record.confidence_delta)
+        .bind(record.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_evidence_for_entity(&self, entity_id: Uuid) -> Result<Vec<EvidenceRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, entity_id, interaction_id, query_text, outcome, source, confidence_delta, created_at
+             FROM evidence_records WHERE entity_id = ? ORDER BY created_at DESC"
+        )
+        .bind(entity_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let id_str: String = row.get("id");
+            let entity_str: String = row.get("entity_id");
+            let interaction_str: Option<String> = row.get("interaction_id");
+            let outcome_str: String = row.get("outcome");
+            let source_str: String = row.get("source");
+            let created_str: String = row.get("created_at");
+
+            records.push(EvidenceRecord {
+                id: id_str.parse()?,
+                entity_id: entity_str.parse()?,
+                interaction_id: interaction_str.map(|s| s.parse()).transpose()?,
+                query_text: row.get("query_text"),
+                outcome: EvidenceOutcome::from_str(&outcome_str)
+                    .ok_or_else(|| anyhow::anyhow!("invalid outcome: {outcome_str}"))?,
+                source: EvidenceSource::from_str(&source_str)
+                    .ok_or_else(|| anyhow::anyhow!("invalid source: {source_str}"))?,
+                confidence_delta: row.get("confidence_delta"),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)?.with_timezone(&chrono::Utc),
+            });
+        }
+        Ok(records)
+    }
+
+    async fn boost_confidence(&self, entity_id: Uuid, delta: f64) -> Result<()> {
+        sqlx::query(
+            "UPDATE semantic_definitions
+             SET confidence = MIN(1.0, MAX(0.0, confidence + ?)),
+                 confidence_refreshed_at = ?
+             WHERE entity_id = ?"
+        )
+        .bind(delta)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(entity_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // --- Sync checksums (incremental sync) ---
+
+    async fn get_sync_checksum(&self, adapter: &str, entity_key: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT checksum FROM sync_checksums WHERE adapter = ? AND entity_key = ?"
+        )
+        .bind(adapter)
+        .bind(entity_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.0))
+    }
+
+    async fn upsert_sync_checksum(&self, adapter: &str, entity_key: &str, checksum: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sync_checksums (adapter, entity_key, checksum, synced_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(adapter, entity_key) DO UPDATE SET checksum = excluded.checksum, synced_at = excluded.synced_at"
+        )
+        .bind(adapter)
+        .bind(entity_key)
+        .bind(checksum)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_sync_checksums(&self, adapter: &str) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT entity_key, checksum FROM sync_checksums WHERE adapter = ?"
+        )
+        .bind(adapter)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1399,7 @@ mod tests {
             confidence: 0.85,
             confidence_refreshed_at: Some(now()),
             embedding: Some(vec![0.1, 0.2, 0.3]),
+            definition_hash: None,
             created_at: now(),
             updated_at: now(),
         };

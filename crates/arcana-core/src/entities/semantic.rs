@@ -18,6 +18,8 @@ pub struct SemanticDefinition {
     pub confidence_refreshed_at: Option<DateTime<Utc>>,
     /// Embedding vector (stored as JSON array for SQLite compat; use usearch for ANN).
     pub embedding: Option<Vec<f32>>,
+    /// SHA-256 hash of the definition text (for embedding cache — skip re-embed if unchanged).
+    pub definition_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
