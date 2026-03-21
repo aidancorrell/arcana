@@ -213,102 +213,135 @@ Snowflake `INFORMATION_SCHEMA` (no dbt required), BigQuery, Databricks Unity Cat
 
 ---
 
-## Scale Roadmap — 2000+ Model dbt Projects
+## Deployment Roadmap — From Local Tool to Team Infrastructure
 
-The MVP works on jaffle-shop (19 models). The following phases target production-scale catalogs where the hard problems are search quality, undocumented models, table redundancy, and context budget.
-
-Priority order is based on impact: a large org with 2000 models and no descriptions gets zero value from arcana unless phases A and B ship first.
+The MVP and scale phases prove Arcana works. The deployment roadmap takes it from "one engineer runs it locally" to "shared infrastructure the whole data team relies on."
 
 ---
 
-### Phase A — Hybrid Search + Re-ranking  ⬜ TODO
-**Problem:** At 2000 models the flat cosine scan returns too many mediocre hits (all scores within 0.05 of each other). The churn query above illustrates this — 8 results, all at 0.44–0.49, no clear winner.
+### Phase H — HTTP/SSE MCP Transport (Multi-User Server)  ⬜ IN PROGRESS
 
-**Solution:** Two-stage retrieval.
-- Stage 1 (recall): BM25 sparse retrieval (tantivy crate) OR SQLite FTS5 `MATCH` query retrieves top-50 candidates by keyword overlap
-- Stage 2 (precision): dense cosine re-ranks the 50 candidates to top-k
-- Optional stage 3: cross-encoder re-ranking via a small Claude call (classify each candidate as relevant/not for the query) — expensive but accurate
+**Problem:** Stdio transport means each user runs their own Arcana process with their own metadata copy. No shared state, no shared feedback loop, no centralized management.
 
-**Implementation sketch:**
-- Add `arcana-core/src/store/fts.rs` — FTS5 virtual table over `semantic_definitions.definition`
-- `MetadataStore` gets `fts_search(query, limit) -> Vec<(Uuid, f32)>`
-- `RelevanceRanker::rank()` fuses BM25 hits + vector hits via Reciprocal Rank Fusion before re-ranking
-- No new dependencies if using FTS5 (already in SQLite)
+**Solution:** Add HTTP+SSE server transport so multiple MCP clients connect to one running Arcana instance.
 
-**Success metric:** "churn" query returns `most_recent_order_date` as the clear #1 hit, not buried at #7.
+**Implementation:**
+- `rmcp` already has `transport-sse-server` feature — axum-based SSE server with session management.
+- Add `axum` dependency, enable `rmcp` feature `transport-sse-server`.
+- `ArcanaServer::serve_http(bind_addr)` — starts axum router with SSE endpoint (`GET /sse`) and message endpoint (`POST /message`).
+- `arcana serve` (no `--stdio`) binds to `[mcp] bind_addr` (default `127.0.0.1:8477`).
+- API key auth middleware: `[mcp] api_keys = ["key1", "key2"]` in config. Validates `Authorization: Bearer <key>` header.
+- Health endpoint: `GET /health` returns server status, entity counts, index stats.
 
----
-
-### Phase B — Auto-Description Generation  ⬜ TODO
-**Problem:** Large orgs have hundreds of undocumented models. Arcana's semantic search is only as good as the definitions it has. Models with no dbt description = invisible.
-
-**Solution:** For every table/column with no `SemanticDefinition` (or a very low-confidence one), call Claude to synthesize a definition from:
-- Table name + column names
-- Sample SQL from the dbt model (from `manifest.json` `compiled_code` field)
-- Upstream table names from lineage
-
-Auto-generated definitions get `DefinitionSource::LlmDrafted` (confidence 0.40) and are flagged for human review.
-
-**New CLI command:** `arcana enrich [--dry-run] [--model <table>]`
-- Finds all entities with no definition or confidence < 0.5
-- Calls Claude in batches (50 tables per prompt) with structured output
-- Writes definitions back via `upsert_semantic_definition`
-- Optionally flags them in the store for human review
-
-**New config key:**
+**Config:**
 ```toml
-[enrichment]
-model = "claude-opus-4-6"  # or haiku for cost efficiency
-batch_size = 50
-auto_enrich_on_sync = false  # opt-in: run enrich after every sync
+[mcp]
+bind_addr = "0.0.0.0:8477"
+max_context_tokens = 8000
+api_keys = ["arcana-team-key-1"]  # optional; if empty, no auth required
 ```
 
-**Success metric:** 2000-model project goes from 20% definition coverage to 90%+ in a single `arcana enrich` run.
+**Client config (Claude Desktop / Claude Code):**
+```json
+{
+  "mcpServers": {
+    "arcana": {
+      "url": "http://arcana-server.internal:8477/sse",
+      "headers": { "Authorization": "Bearer arcana-team-key-1" }
+    }
+  }
+}
+```
+
+**Success metric:** 5 engineers on the same team all get context from one Arcana server. Feedback from one user's `report_outcome` improves results for everyone.
 
 ---
 
-### Phase C — Redundancy Detection  ✅ COMPLETE
-See concise summary above.
+### Phase I — Docker Packaging & Deployment  ⬜ TODO
+
+**Problem:** Installing Rust, building from source, and managing config files is a barrier for platform teams that just want to run a service.
+
+**Solution:** Multi-stage Docker build producing a minimal container image.
+
+**Implementation:**
+- `Dockerfile` — multi-stage: `rust:1.82-slim` builder → `debian:bookworm-slim` runtime.
+- `docker-compose.yml` — Arcana server + volume for SQLite DB + optional Postgres sidecar.
+- Config via environment variables: `ARCANA_DATABASE_URL`, `ARCANA_OPENAI_API_KEY`, `ARCANA_ANTHROPIC_API_KEY`, `ARCANA_MCP_BIND_ADDR`.
+- `ENTRYPOINT ["arcana", "serve"]` — starts HTTP MCP server by default.
+- Health check: `HEALTHCHECK CMD curl -f http://localhost:8477/health`.
+- Published to GitHub Container Registry: `ghcr.io/aidancorrell/arcana:latest`.
+
+**Deployment patterns:**
+```bash
+# Quickstart
+docker run -p 8477:8477 \
+  -v arcana-data:/data \
+  -e ARCANA_DATABASE_URL=sqlite:///data/arcana.db \
+  -e OPENAI_API_KEY=sk-... \
+  ghcr.io/aidancorrell/arcana:latest
+
+# With docker-compose (includes scheduled sync)
+docker compose up -d
+```
+
+**Success metric:** Platform engineer deploys Arcana in under 5 minutes with `docker compose up`.
 
 ---
 
-### Phase D — Graph-Aware Context Assembly  ✅ COMPLETE
-See concise summary above.
+### Phase J — CI/CD Integration (Automated Sync)  ⬜ TODO
+
+**Problem:** Metadata goes stale if someone has to remember to run `arcana sync` after dbt changes.
+
+**Solution:** Automated sync triggered by dbt CI events.
+
+**Implementation:**
+- **GitHub Action** (`arcana-sync-action`): runs on push to `main` when `models/` or `schema.yml` changes. Calls `arcana sync --adapter dbt && arcana enrich && arcana reembed` against the shared server.
+- **Webhook endpoint**: `POST /api/sync` on the HTTP server — triggers sync for a given adapter. Secured by API key.
+- **Scheduled sync**: `arcana serve --sync-interval 6h` — background task runs sync + enrich + reembed on a timer.
+- **dbt Cloud webhook**: listens for `job.completed` events, triggers sync automatically.
+
+**Config:**
+```toml
+[sync]
+auto_interval = "6h"         # background sync interval (0 = disabled)
+auto_enrich = true            # run enrich after each sync
+auto_reembed = true           # run reembed after each sync
+webhook_secret = "whsec_..."  # for dbt Cloud webhook validation
+```
+
+**Success metric:** Engineer merges a dbt model change, and within minutes the updated metadata is available to all agents via MCP.
 
 ---
 
-### Phase E — Self-Improving Feedback Loop  ✅ COMPLETE
-See concise summary above.
+### Phase K — Observability & Admin  ⬜ TODO
+
+**Problem:** No visibility into what Arcana knows, what's stale, what agents are asking, or whether the system is healthy.
+
+**Solution:** Admin API endpoints and an `arcana status` dashboard.
+
+**Implementation:**
+- **Admin API** (on same HTTP server, under `/api/admin/`):
+  - `GET /api/admin/stats` — entity counts, definition coverage %, stale entity count, index size.
+  - `GET /api/admin/recent-queries` — last N `get_context` calls with query text, result count, latency.
+  - `GET /api/admin/coverage` — per-schema breakdown of tables with/without definitions.
+  - `GET /api/admin/evidence` — recent evidence records (feedback trail).
+- **`arcana status --detailed`** — CLI command that calls the admin API and prints a formatted report.
+- **Prometheus metrics** (optional): request count, latency histogram, cache hit rate, index size gauge.
+
+**Success metric:** Data platform lead can answer "what % of our tables does Arcana know about?" and "what queries are agents running?" without reading the DB.
 
 ---
 
-### Phase F — Performance at Scale  ✅ COMPLETE
-See concise summary above.
+### Deployment Summary
 
----
+| Phase | What | Unlocks | Status |
+|-------|------|---------|--------|
+| H — HTTP Transport | Multi-user MCP server | Shared team deployment | ⬜ In Progress |
+| I — Docker | Container image + compose | Easy deployment | ⬜ TODO |
+| J — CI/CD | Auto-sync on dbt changes | Always-fresh metadata | ⬜ TODO |
+| K — Observability | Admin API + metrics | Operational visibility | ⬜ TODO |
 
-### Phase G — Additional Adapters  ⬜ TODO
-- **Snowflake `INFORMATION_SCHEMA`** — schema/column sync without needing dbt. Any Snowflake warehouse works, not just dbt-managed ones.
-- **BigQuery `INFORMATION_SCHEMA`** — same pattern.
-- **Databricks Unity Catalog** — REST API for table/column metadata, lineage from Delta Lake.
-- **LookML** — parse `view` and `explore` files for field definitions (high value: LookML definitions are often very good).
-- **dbt Cloud API** — pull dbt docs from hosted dbt Cloud instead of local `manifest.json`.
-
----
-
-### Summary: Priority for a 2000-Model Project
-
-| Phase | Impact | Effort | Ship first? |
-|-------|--------|--------|-------------|
-| A — Hybrid Search | Very High | Medium | ✅ Yes |
-| B — Auto-Description | Very High | Medium | ✅ Yes |
-| C — Redundancy Detection | High | Medium | ✅ Done |
-| D — Graph-Aware Context | High | High | ✅ Done |
-| E — Feedback Loop | Medium | High | ✅ Done |
-| F — Performance | Medium | Medium | ✅ Done |
-| G — Adapters | Varies | Medium | On demand |
-
-Phases A and B together turn arcana from "works on well-documented small projects" to "works on any real-world dbt project."
+Phase H is the critical path — without it, Phases I–K have no server to deploy/monitor.
 
 ---
 
