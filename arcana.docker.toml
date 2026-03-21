@@ -1,0 +1,29 @@
+# Arcana Docker Configuration
+# Environment variables OPENAI_API_KEY and ANTHROPIC_API_KEY are passed via docker-compose.
+
+[database]
+url = "sqlite:///data/arcana.db"
+
+[embeddings]
+provider = "openai"
+# API key comes from OPENAI_API_KEY env var
+openai_model = "text-embedding-3-small"
+dimensions = 1536
+
+[index]
+persist_path = "/data/arcana.idx"
+
+[dbt]
+# Mount your dbt project to /dbt, or override this path
+project_path = "/dbt"
+
+[enrichment]
+# API key comes from ANTHROPIC_API_KEY env var
+
+[confidence]
+decay_rate_per_day = 0.02
+stale_threshold = 0.4
+
+[mcp]
+bind_addr = "0.0.0.0:8477"
+max_context_tokens = 8000

@@ -1,0 +1,11 @@
+target/
+.git/
+sandbox/
+.vscode/
+.idea/
+*.md
+!config/**
+.env
+*.key
+*.pem
+.DS_Store
