@@ -85,6 +85,45 @@ impl VectorIndex {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Retrieve the stored embedding for an entity, or an error if not found.
+    pub fn get(&self, id: Uuid) -> Result<Vec<f32>> {
+        self.vectors
+            .read()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no embedding found for entity {id}"))
+    }
+
+    /// Returns all pairs `(id_a, id_b, similarity)` where cosine similarity >= threshold.
+    /// Each pair is returned once with `id_a < id_b` by UUID ordering.
+    /// Used for redundancy/dedup detection.
+    pub fn pairs_above_threshold(&self, threshold: f32) -> Vec<(Uuid, Uuid, f32)> {
+        let store = self.vectors.read().unwrap();
+        let entries: Vec<(&Uuid, &Vec<f32>)> = store.iter().collect();
+        let mut results = Vec::new();
+
+        for i in 0..entries.len() {
+            let norm_a = l2_norm(entries[i].1);
+            if norm_a == 0.0 { continue; }
+            for j in (i + 1)..entries.len() {
+                let norm_b = l2_norm(entries[j].1);
+                if norm_b == 0.0 { continue; }
+                let sim = dot_product(entries[i].1, entries[j].1) / (norm_a * norm_b);
+                if sim >= threshold {
+                    let (a, b) = if entries[i].0 < entries[j].0 {
+                        (*entries[i].0, *entries[j].0)
+                    } else {
+                        (*entries[j].0, *entries[i].0)
+                    };
+                    results.push((a, b, sim));
+                }
+            }
+        }
+
+        results
+    }
 }
 
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {

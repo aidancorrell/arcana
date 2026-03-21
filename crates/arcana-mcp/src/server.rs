@@ -13,9 +13,11 @@ use rmcp::{
 use serde_json::Value;
 use std::sync::Arc;
 
+use arcana_core::embeddings::VectorIndex;
 use crate::tools::{
-    DescribeTableInput, EstimateCostInput, GetContextInput, UpdateContextInput,
-    handle_describe_table, handle_estimate_cost, handle_get_context, handle_update_context,
+    DescribeTableInput, EstimateCostInput, FindSimilarTablesInput, GetContextInput,
+    UpdateContextInput, handle_describe_table, handle_estimate_cost, handle_find_similar_tables,
+    handle_get_context, handle_update_context,
 };
 
 /// The Arcana MCP server — exposes metadata context to AI agents via the Model Context Protocol.
@@ -24,6 +26,7 @@ pub struct ArcanaServer {
     store: Arc<dyn MetadataStore>,
     ranker: Arc<RelevanceRanker>,
     serializer: Arc<ContextSerializer>,
+    entity_index: Arc<VectorIndex>,
     snowflake_config: Option<Arc<arcana_adapters::snowflake::SnowflakeConfig>>,
 }
 
@@ -32,8 +35,9 @@ impl ArcanaServer {
         store: Arc<dyn MetadataStore>,
         ranker: Arc<RelevanceRanker>,
         serializer: Arc<ContextSerializer>,
+        entity_index: Arc<VectorIndex>,
     ) -> Self {
-        Self { store, ranker, serializer, snowflake_config: None }
+        Self { store, ranker, serializer, entity_index, snowflake_config: None }
     }
 
     pub fn with_snowflake_config(
@@ -69,7 +73,8 @@ impl ArcanaServer {
                         "properties": {
                             "query": {"type": "string"},
                             "top_k": {"type": "integer", "default": 10},
-                            "min_confidence": {"type": "number", "default": 0.0}
+                            "min_confidence": {"type": "number", "default": 0.0},
+                            "expand_lineage": {"type": "boolean", "default": true}
                         },
                         "required": ["query"]
                     }))
@@ -128,6 +133,24 @@ impl ArcanaServer {
                     .unwrap(),
                 ),
             },
+            Tool {
+                name: "find_similar_tables".into(),
+                description: "Find tables semantically similar to a given table. Useful for \
+                     detecting duplicates or finding related tables."
+                    .into(),
+                input_schema: Arc::new(
+                    serde_json::from_value(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "table_ref": {"type": "string", "description": "Table name or UUID"},
+                            "threshold": {"type": "number", "default": 0.85},
+                            "limit": {"type": "integer", "default": 5}
+                        },
+                        "required": ["table_ref"]
+                    }))
+                    .unwrap(),
+                ),
+            },
         ]
     }
 }
@@ -173,6 +196,7 @@ impl ServerHandler for ArcanaServer {
         let store = self.store.clone();
         let ranker = self.ranker.clone();
         let serializer = self.serializer.clone();
+        let entity_index = self.entity_index.clone();
         let snowflake_config = self.snowflake_config.clone();
 
         async move {
@@ -214,6 +238,16 @@ impl ServerHandler for ArcanaServer {
                         ))
                         .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
                     handle_update_context(input, store)
+                        .await
+                        .map(|o| serde_json::to_string_pretty(&o).unwrap_or_default())
+                }
+                "find_similar_tables" => {
+                    let input: FindSimilarTablesInput =
+                        serde_json::from_value(Value::Object(
+                            request.arguments.unwrap_or_default(),
+                        ))
+                        .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
+                    handle_find_similar_tables(input, store, entity_index)
                         .await
                         .map(|o| serde_json::to_string_pretty(&o).unwrap_or_default())
                 }
