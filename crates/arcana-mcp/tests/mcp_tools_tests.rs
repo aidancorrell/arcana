@@ -147,6 +147,7 @@ async fn seed_full_table(store: &SqliteStore) -> Table {
         confidence: 0.85,
         confidence_refreshed_at: Some(now()),
         embedding: None,
+        definition_hash: None,
         created_at: now(),
         updated_at: now(),
     };

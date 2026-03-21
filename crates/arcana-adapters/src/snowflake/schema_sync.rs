@@ -136,6 +136,7 @@ pub async fn sync_schemas(config: &SnowflakeConfig, data_source_id: Uuid) -> Res
                 confidence: 0.80,
                 confidence_refreshed_at: Some(now),
                 embedding: None,
+                definition_hash: None,
                 created_at: now,
                 updated_at: now,
             });
@@ -218,6 +219,7 @@ pub async fn sync_schemas(config: &SnowflakeConfig, data_source_id: Uuid) -> Res
                 confidence: 0.80,
                 confidence_refreshed_at: Some(now),
                 embedding: None,
+                definition_hash: None,
                 created_at: now,
                 updated_at: now,
             });

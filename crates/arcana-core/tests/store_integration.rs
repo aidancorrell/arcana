@@ -315,6 +315,7 @@ async fn semantic_definition_roundtrip_with_embedding() {
         confidence: 0.85,
         confidence_refreshed_at: Some(now()),
         embedding: Some(vec![0.1, 0.2, 0.3, 0.4]),
+        definition_hash: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -343,6 +344,7 @@ async fn multiple_semantic_definitions_ordered_by_confidence() {
             confidence: conf,
             confidence_refreshed_at: Some(now()),
             embedding: None,
+            definition_hash: None,
             created_at: now(),
             updated_at: now(),
         };

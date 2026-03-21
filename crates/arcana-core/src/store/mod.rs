@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::entities::{
     Column, ColumnProfile, DataContract, DataSource, Document, DocumentChunk, EntityLink,
-    LineageEdge, Metric, Schema, SemanticDefinition, Table, TableCluster, TableClusterMember,
-    UsageRecord, AgentInteraction,
+    EvidenceRecord, LineageEdge, Metric, Schema, SemanticDefinition, Table, TableCluster,
+    TableClusterMember, UsageRecord, AgentInteraction,
 };
 
 /// The primary metadata store trait — implemented by SQLite (and later PostgreSQL).
@@ -72,6 +72,17 @@ pub trait MetadataStore: Send + Sync {
     async fn insert_usage_record(&self, record: &UsageRecord) -> Result<()>;
     async fn insert_agent_interaction(&self, interaction: &AgentInteraction) -> Result<()>;
     async fn update_interaction_feedback(&self, id: Uuid, was_helpful: bool) -> Result<()>;
+
+    // --- Evidence (feedback loop) ---
+    async fn insert_evidence_record(&self, record: &EvidenceRecord) -> Result<()>;
+    async fn get_evidence_for_entity(&self, entity_id: Uuid) -> Result<Vec<EvidenceRecord>>;
+    /// Boost confidence on all semantic definitions for an entity by `delta`, clamped to [0.0, 1.0].
+    async fn boost_confidence(&self, entity_id: Uuid, delta: f64) -> Result<()>;
+
+    // --- Sync checksums (incremental sync) ---
+    async fn get_sync_checksum(&self, adapter: &str, entity_key: &str) -> Result<Option<String>>;
+    async fn upsert_sync_checksum(&self, adapter: &str, entity_key: &str, checksum: &str) -> Result<()>;
+    async fn list_sync_checksums(&self, adapter: &str) -> Result<Vec<(String, String)>>;
 }
 
 pub use sqlite::SqliteStore;

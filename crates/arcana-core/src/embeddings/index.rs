@@ -1,5 +1,7 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::RwLock;
 use uuid::Uuid;
 
@@ -124,6 +126,42 @@ impl VectorIndex {
 
         results
     }
+
+    /// Save the index to disk as a bincode-serialized snapshot.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let store = self.vectors.read().unwrap();
+        let snapshot = IndexSnapshot {
+            dimensions: self.dimensions,
+            entries: store
+                .iter()
+                .map(|(id, vec)| (id.to_string(), vec.clone()))
+                .collect(),
+        };
+        let bytes = bincode::serialize(&snapshot)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Load an index from a bincode-serialized snapshot on disk.
+    pub fn load(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let snapshot: IndexSnapshot = bincode::deserialize(&bytes)?;
+        let mut map = HashMap::new();
+        for (id_str, vec) in snapshot.entries {
+            let id: Uuid = id_str.parse()?;
+            map.insert(id, vec);
+        }
+        Ok(Self {
+            dimensions: snapshot.dimensions,
+            vectors: RwLock::new(map),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct IndexSnapshot {
+    dimensions: usize,
+    entries: Vec<(String, Vec<f32>)>,
 }
 
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
