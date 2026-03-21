@@ -388,9 +388,7 @@ impl MetadataStore for SqliteStore {
             r#"
             INSERT INTO schemas (id, data_source_id, database_name, schema_name, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                database_name = excluded.database_name,
-                schema_name = excluded.schema_name,
+            ON CONFLICT(data_source_id, database_name, schema_name) DO UPDATE SET
                 updated_at = excluded.updated_at
             "#,
         )
@@ -426,8 +424,7 @@ impl MetadataStore for SqliteStore {
                 tags, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
+            ON CONFLICT(schema_id, name) DO UPDATE SET
                 table_type = excluded.table_type,
                 description = excluded.description,
                 dbt_model = excluded.dbt_model,
@@ -506,8 +503,7 @@ impl MetadataStore for SqliteStore {
                 created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
+            ON CONFLICT(table_id, name) DO UPDATE SET
                 data_type = excluded.data_type,
                 ordinal_position = excluded.ordinal_position,
                 is_nullable = excluded.is_nullable,
