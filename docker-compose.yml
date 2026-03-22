@@ -3,6 +3,7 @@ services:
     build: .
     ports:
       - "8477:8477"
+      - "8478:8478"
     volumes:
       - arcana-data:/data
     environment:

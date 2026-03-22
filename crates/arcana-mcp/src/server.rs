@@ -67,7 +67,17 @@ impl ArcanaServer {
     /// Clients connect via `GET /sse` for server-sent events and `POST /message`
     /// to send requests. Each SSE connection gets its own MCP session sharing
     /// the same underlying store and index.
-    pub async fn serve_http(self, bind_addr: &str) -> Result<()> {
+    ///
+    /// If `admin_addr` is provided, starts the admin API on that address.
+    /// If `sync_trigger` is provided, it will be passed to the admin server
+    /// so webhook requests can trigger syncs.
+    pub async fn serve_http(
+        self,
+        bind_addr: &str,
+        admin_addr: Option<&str>,
+        webhook_secret: Option<String>,
+        sync_trigger: Option<tokio::sync::mpsc::Sender<()>>,
+    ) -> Result<()> {
         let addr: SocketAddr = bind_addr
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid bind address '{bind_addr}': {e}"))?;
@@ -79,6 +89,39 @@ impl ArcanaServer {
             .map_err(|e| anyhow::anyhow!("failed to bind SSE server on {addr}: {e}"))?;
 
         let ct = sse_server.config.ct.clone();
+
+        // Start admin API if configured
+        if let Some(admin_bind) = admin_addr {
+            let admin_socket: SocketAddr = admin_bind
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid admin address '{admin_bind}': {e}"))?;
+
+            let admin_state = crate::admin::AdminState {
+                store: self.store.clone(),
+                entity_index: self.entity_index.clone(),
+                webhook_secret,
+                sync_trigger,
+            };
+
+            let admin_app = crate::admin::admin_router(admin_state);
+            let admin_listener = tokio::net::TcpListener::bind(admin_socket)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to bind admin server on {admin_socket}: {e}"))?;
+
+            let admin_ct = ct.child_token();
+            tokio::spawn(async move {
+                let server = axum::serve(admin_listener, admin_app)
+                    .with_graceful_shutdown(async move { admin_ct.cancelled().await });
+                if let Err(e) = server.await {
+                    tracing::error!(error = %e, "admin server error");
+                }
+            });
+
+            eprintln!("  Admin API:        http://{admin_socket}/api/admin/stats");
+            eprintln!("  Sync webhook:     http://{admin_socket}/api/sync");
+            eprintln!("  Health:           http://{admin_socket}/health");
+        }
+
         let server = self;
         let _ct = sse_server.with_service(move || server.clone());
 
