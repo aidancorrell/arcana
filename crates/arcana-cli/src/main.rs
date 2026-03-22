@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use arcana_adapters::MetadataAdapter;
+use arcana_core::embeddings::EmbeddingProvider;
 use arcana_core::store::MetadataStore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -68,6 +69,10 @@ enum Commands {
         /// Run as stdio MCP server (for Claude Desktop / Cursor).
         #[arg(long)]
         stdio: bool,
+
+        /// Background sync interval (e.g., "6h", "30m"). Overrides config.
+        #[arg(long)]
+        sync_interval: Option<String>,
     },
 
     /// Semantic search — ask a natural-language question about your data.
@@ -85,7 +90,11 @@ enum Commands {
     },
 
     /// Show sync status: last sync times, stale entities, confidence distribution.
-    Status,
+    Status {
+        /// Show detailed per-schema coverage and definition statistics.
+        #[arg(long)]
+        detailed: bool,
+    },
 
     /// Re-embed all entities and document chunks (e.g., after changing embedding model).
     Reembed {
@@ -139,6 +148,8 @@ struct AppConfig {
     #[serde(default)]
     index: IndexSectionConfig,
     #[serde(default)]
+    sync: SyncSectionConfig,
+    #[serde(default)]
     dbt: Option<DbtSectionConfig>,
     #[serde(default)]
     snowflake: Option<SnowflakeSectionConfig>,
@@ -169,6 +180,8 @@ struct EmbeddingsConfig {
 struct McpConfig {
     bind_addr: String,
     max_context_tokens: usize,
+    /// Admin API bind address. If set, starts admin/webhook server on this address.
+    admin_addr: Option<String>,
 }
 
 impl Default for McpConfig {
@@ -176,11 +189,26 @@ impl Default for McpConfig {
         Self {
             bind_addr: "127.0.0.1:8477".to_string(),
             max_context_tokens: 8000,
+            admin_addr: None,
         }
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Default)]
+struct SyncSectionConfig {
+    /// Background sync interval (e.g., "6h", "30m", "0" = disabled).
+    auto_interval: Option<String>,
+    /// Run `enrich` after each auto-sync.
+    #[serde(default)]
+    auto_enrich: bool,
+    /// Run `reembed` after each auto-sync.
+    #[serde(default)]
+    auto_reembed: bool,
+    /// Secret for webhook authentication (POST /api/sync).
+    webhook_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 struct DbtSectionConfig {
     project_path: PathBuf,
     manifest_path: Option<PathBuf>,
@@ -257,9 +285,11 @@ async fn main() -> Result<()> {
         Commands::Init { path } => cmd_init(&path, &cfg).await,
         Commands::Sync { adapter, full } => cmd_sync(&cfg, adapter.as_deref(), full).await,
         Commands::Ingest { path, source } => cmd_ingest(&cfg, &path, &source).await,
-        Commands::Serve { bind, stdio } => cmd_serve(&cfg, bind.as_deref(), stdio).await,
+        Commands::Serve { bind, stdio, sync_interval } => {
+            cmd_serve(&cfg, bind.as_deref(), stdio, sync_interval.as_deref()).await
+        }
         Commands::Ask { query, top_k, format } => cmd_ask(&cfg, &query, top_k, &format).await,
-        Commands::Status => cmd_status(&cfg).await,
+        Commands::Status { detailed } => cmd_status(&cfg, detailed).await,
         Commands::Reembed { below_confidence, batch_size } => {
             cmd_reembed(&cfg, below_confidence, batch_size).await
         }
@@ -475,7 +505,12 @@ async fn cmd_ingest(cfg: &AppConfig, path: &PathBuf, source_type: &str) -> Resul
     Ok(())
 }
 
-async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) -> Result<()> {
+async fn cmd_serve(
+    cfg: &AppConfig,
+    bind_override: Option<&str>,
+    stdio: bool,
+    sync_interval_override: Option<&str>,
+) -> Result<()> {
     let store: Arc<dyn arcana_core::store::MetadataStore> = Arc::new(open_store(cfg).await?);
     let embedding_provider = build_embedding_provider(cfg)?;
     let dimensions = cfg.embeddings.dimensions.unwrap_or(1536);
@@ -496,7 +531,7 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
         ..Default::default()
     });
 
-    let mut server = arcana_mcp::ArcanaServer::new(store, ranker, serializer, entity_index.clone());
+    let mut server = arcana_mcp::ArcanaServer::new(store.clone(), ranker, serializer, entity_index.clone());
 
     // Attach Snowflake config if present (enables estimate_cost tool)
     if let Some(sf_cfg) = &cfg.snowflake {
@@ -506,7 +541,6 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
     if stdio {
         println!("Starting Arcana MCP server on stdio...");
         let result = server.serve_stdio().await;
-        // Save index to disk on shutdown if persist_path is configured
         if let Some(persist_path) = &cfg.index.persist_path {
             let path = std::path::Path::new(persist_path);
             if let Err(e) = entity_index.save(path) {
@@ -515,9 +549,67 @@ async fn cmd_serve(cfg: &AppConfig, bind_override: Option<&str>, stdio: bool) ->
         }
         result
     } else {
+        // Set up background sync if configured
+        let sync_interval_str = sync_interval_override
+            .or(cfg.sync.auto_interval.as_deref());
+        let sync_trigger = if sync_interval_str.is_some() || cfg.mcp.admin_addr.is_some() {
+            let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+            // Spawn background sync worker
+            let sync_store = store.clone();
+            let dbt_cfg = cfg.dbt.clone();
+            let auto_enrich = cfg.sync.auto_enrich;
+            let auto_reembed = cfg.sync.auto_reembed;
+            let embed_cfg_provider = cfg.embeddings.openai_api_key.clone();
+            let embed_cfg_model = cfg.embeddings.openai_model.clone();
+            let embed_cfg_dimensions = cfg.embeddings.dimensions;
+            let enrichment_key = cfg.enrichment.anthropic_api_key.clone();
+            let enrichment_model = cfg.enrichment.model.clone();
+            let enrichment_batch_size = cfg.enrichment.batch_size;
+
+            tokio::spawn(background_sync_worker(
+                rx,
+                sync_store,
+                dbt_cfg,
+                auto_enrich,
+                auto_reembed,
+                embed_cfg_provider,
+                embed_cfg_model,
+                embed_cfg_dimensions,
+                enrichment_key,
+                enrichment_model,
+                enrichment_batch_size,
+            ));
+
+            // Spawn interval trigger if configured
+            if let Some(interval_str) = sync_interval_str {
+                if let Some(duration) = parse_duration(interval_str) {
+                    let interval_tx = tx.clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(duration);
+                        interval.tick().await; // skip first immediate tick
+                        loop {
+                            interval.tick().await;
+                            tracing::info!("scheduled sync trigger");
+                            let _ = interval_tx.try_send(());
+                        }
+                    });
+                    eprintln!("  Background sync:  every {interval_str}");
+                }
+            }
+
+            Some(tx)
+        } else {
+            None
+        };
+
         let bind_addr = bind_override.unwrap_or(&cfg.mcp.bind_addr);
-        let result = server.serve_http(bind_addr).await;
-        // Save index to disk on shutdown if persist_path is configured
+        let admin_addr = cfg.mcp.admin_addr.as_deref();
+        let webhook_secret = cfg.sync.webhook_secret.clone();
+
+        let result = server
+            .serve_http(bind_addr, admin_addr, webhook_secret, sync_trigger)
+            .await;
+
         if let Some(persist_path) = &cfg.index.persist_path {
             let path = std::path::Path::new(persist_path);
             if let Err(e) = entity_index.save(path) {
@@ -575,33 +667,129 @@ async fn cmd_ask(cfg: &AppConfig, query: &str, top_k: usize, format: &str) -> Re
     Ok(())
 }
 
-async fn cmd_status(cfg: &AppConfig) -> Result<()> {
+async fn cmd_status(cfg: &AppConfig, detailed: bool) -> Result<()> {
     let store = open_store(cfg).await?;
 
     let data_sources = store.list_data_sources().await?;
     let mut table_count = 0usize;
     let mut column_count = 0usize;
+    let mut tables_with_defs = 0usize;
+
+    // Per-schema tracking for detailed mode
+    struct SchemaStats {
+        ds_name: String,
+        schema_name: String,
+        tables: usize,
+        tables_with_defs: usize,
+        columns: usize,
+        stale_tables: usize,
+    }
+    let mut schema_stats: Vec<SchemaStats> = Vec::new();
 
     for ds in &data_sources {
         let schemas = store.list_schemas(ds.id).await?;
         for schema in &schemas {
             let tables = store.list_tables(schema.id).await?;
+            let mut ss = SchemaStats {
+                ds_name: ds.name.clone(),
+                schema_name: format!("{}.{}", schema.database_name, schema.schema_name),
+                tables: tables.len(),
+                tables_with_defs: 0,
+                columns: 0,
+                stale_tables: 0,
+            };
             for table in &tables {
                 table_count += 1;
+                let defs = store.get_semantic_definitions(table.id).await?;
+                if !defs.is_empty() {
+                    tables_with_defs += 1;
+                    ss.tables_with_defs += 1;
+                }
+                // Check for stale confidence
+                let all_stale = defs.iter().all(|d| d.confidence < 0.4);
+                if !defs.is_empty() && all_stale {
+                    ss.stale_tables += 1;
+                }
                 let cols = store.list_columns(table.id).await?;
                 column_count += cols.len();
+                ss.columns += cols.len();
             }
+            schema_stats.push(ss);
         }
     }
 
     let metrics = store.list_metrics().await?;
+    let all_defs = store.list_all_semantic_definitions().await?;
+    let defs_with_embeddings = all_defs.iter().filter(|d| d.embedding.is_some()).count();
+    let clusters = store.list_table_clusters().await?;
+
+    let coverage = if table_count > 0 {
+        (tables_with_defs as f64 / table_count as f64) * 100.0
+    } else {
+        0.0
+    };
 
     println!("Arcana Status");
     println!("=============");
-    println!("  Data sources:  {}", data_sources.len());
-    println!("  Tables:        {}", table_count);
-    println!("  Columns:       {}", column_count);
-    println!("  Metrics:       {}", metrics.len());
+    println!("  Data sources:    {}", data_sources.len());
+    println!("  Tables:          {}", table_count);
+    println!("  Columns:         {}", column_count);
+    println!("  Metrics:         {}", metrics.len());
+    println!("  Definitions:     {}", all_defs.len());
+    println!("  Embedded:        {}", defs_with_embeddings);
+    println!("  Coverage:        {:.1}%", coverage);
+    println!("  Clusters:        {}", clusters.len());
+
+    if detailed {
+        println!();
+        println!("Per-Schema Coverage");
+        println!("-------------------");
+        for ss in &schema_stats {
+            let cov = if ss.tables > 0 {
+                (ss.tables_with_defs as f64 / ss.tables as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  [{}/{}] {} — {} tables, {} columns, {:.0}% coverage{}",
+                ss.ds_name,
+                ss.schema_name,
+                ss.schema_name,
+                ss.tables,
+                ss.columns,
+                cov,
+                if ss.stale_tables > 0 {
+                    format!(", {} stale", ss.stale_tables)
+                } else {
+                    String::new()
+                }
+            );
+        }
+
+        // Confidence distribution
+        println!();
+        println!("Confidence Distribution");
+        println!("-----------------------");
+        let mut buckets = [0usize; 5]; // [0-0.2, 0.2-0.4, 0.4-0.6, 0.6-0.8, 0.8-1.0]
+        for def in &all_defs {
+            let idx = ((def.confidence * 5.0).floor() as usize).min(4);
+            buckets[idx] += 1;
+        }
+        let labels = ["0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"];
+        for (label, count) in labels.iter().zip(buckets.iter()) {
+            let bar_width = if all_defs.is_empty() {
+                0
+            } else {
+                (*count * 30) / all_defs.len().max(1)
+            };
+            println!(
+                "  {}: {:>4} {}",
+                label,
+                count,
+                "█".repeat(bar_width)
+            );
+        }
+    }
 
     Ok(())
 }
@@ -938,6 +1126,255 @@ async fn flush_enrichment_batch(
     }
 
     Ok(written)
+}
+
+// ---------------------------------------------------------------------------
+// Background sync worker
+// ---------------------------------------------------------------------------
+
+/// Parse a human-readable duration string like "6h", "30m", "1d".
+fn parse_duration(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if s == "0" || s.is_empty() {
+        return None;
+    }
+    let (num_str, unit) = if s.ends_with('d') {
+        (&s[..s.len() - 1], 'd')
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], 'h')
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], 'm')
+    } else if s.ends_with('s') {
+        (&s[..s.len() - 1], 's')
+    } else {
+        return None;
+    };
+    let num: u64 = num_str.parse().ok()?;
+    let secs = match unit {
+        'd' => num * 86400,
+        'h' => num * 3600,
+        'm' => num * 60,
+        's' => num,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// Background worker that listens for sync triggers (from webhook or timer)
+/// and runs sync + optional enrich + reembed.
+async fn background_sync_worker(
+    mut rx: tokio::sync::mpsc::Receiver<()>,
+    store: Arc<dyn arcana_core::store::MetadataStore>,
+    dbt_cfg: Option<DbtSectionConfig>,
+    auto_enrich: bool,
+    auto_reembed: bool,
+    embed_api_key: Option<String>,
+    embed_model: Option<String>,
+    embed_dimensions: Option<usize>,
+    enrichment_api_key: Option<String>,
+    enrichment_model: Option<String>,
+    enrichment_batch_size: Option<usize>,
+) {
+    while rx.recv().await.is_some() {
+        tracing::info!("background sync starting");
+        if let Err(e) = run_background_sync(
+            &store,
+            &dbt_cfg,
+            auto_enrich,
+            auto_reembed,
+            &embed_api_key,
+            embed_model.as_deref(),
+            embed_dimensions,
+            &enrichment_api_key,
+            enrichment_model.as_deref(),
+            enrichment_batch_size,
+        )
+        .await
+        {
+            tracing::error!("background sync failed: {e}");
+        } else {
+            tracing::info!("background sync complete");
+        }
+    }
+}
+
+async fn run_background_sync(
+    store: &Arc<dyn arcana_core::store::MetadataStore>,
+    dbt_cfg: &Option<DbtSectionConfig>,
+    auto_enrich: bool,
+    auto_reembed: bool,
+    embed_api_key: &Option<String>,
+    embed_model: Option<&str>,
+    embed_dimensions: Option<usize>,
+    enrichment_api_key: &Option<String>,
+    enrichment_model: Option<&str>,
+    enrichment_batch_size: Option<usize>,
+) -> Result<()> {
+    // dbt sync
+    if let Some(dbt) = dbt_cfg {
+        let ds_id = get_or_create_data_source(
+            store.as_ref(),
+            "dbt",
+            arcana_core::entities::DataSourceType::Dbt,
+        )
+        .await?;
+
+        let mut adapter_cfg =
+            arcana_adapters::dbt::DbtConfig::new(&dbt.project_path, ds_id);
+        if let Some(mp) = &dbt.manifest_path {
+            adapter_cfg.manifest_path = mp.clone();
+        }
+        if let Some(cp) = &dbt.catalog_path {
+            adapter_cfg.catalog_path = cp.clone();
+        }
+
+        // Incremental sync
+        let known: std::collections::HashMap<String, String> = store
+            .list_sync_checksums("dbt")
+            .await?
+            .into_iter()
+            .collect();
+        let manifest_path = std::path::Path::new(&adapter_cfg.manifest_path);
+        let output = arcana_adapters::dbt::manifest::parse_manifest_incremental(
+            manifest_path,
+            ds_id,
+            &known,
+        )
+        .await?;
+
+        upsert_sync_output(store.as_ref(), &output).await?;
+        for (key, checksum) in &output.changed_checksums {
+            store.upsert_sync_checksum("dbt", key, checksum).await?;
+        }
+        tracing::info!(
+            tables = output.tables.len(),
+            columns = output.columns.len(),
+            "dbt sync complete"
+        );
+    }
+
+    // Auto-enrich (simplified — enrich all undescribed tables)
+    if auto_enrich {
+        let api_key = enrichment_api_key
+            .clone()
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .or_else(|| std::env::var("ANTHROPIC_ARCANA_KEY").ok());
+
+        if let Some(key) = api_key {
+            let model = enrichment_model.unwrap_or("claude-haiku-4-5-20251001");
+            let batch_size = enrichment_batch_size.unwrap_or(20);
+            let provider = arcana_core::enrichment::claude::ClaudeEnrichmentProvider::new(
+                key,
+                model.to_string(),
+                batch_size,
+            );
+            tracing::info!("running auto-enrich");
+            // Enrich undescribed tables (simplified version)
+            let data_sources = store.list_data_sources().await?;
+            for ds in &data_sources {
+                let schemas = store.list_schemas(ds.id).await?;
+                for schema in &schemas {
+                    let tables = store.list_tables(schema.id).await?;
+                    let mut requests = Vec::new();
+                    let mut ids = Vec::new();
+                    for table in &tables {
+                        let existing = store.get_semantic_definitions(table.id).await?;
+                        let has_good_def = existing.iter().any(|d| {
+                            use arcana_core::entities::DefinitionSource;
+                            matches!(
+                                d.source,
+                                DefinitionSource::Manual
+                                    | DefinitionSource::DbtYaml
+                                    | DefinitionSource::SnowflakeComment
+                            )
+                        });
+                        if has_good_def {
+                            continue;
+                        }
+                        let cols = store.list_columns(table.id).await?;
+                        let col_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+                        requests.push(arcana_core::enrichment::EnrichmentRequest {
+                            table_name: table.name.clone(),
+                            column_names: col_names,
+                            upstream_tables: vec![],
+                            column_name: None,
+                        });
+                        ids.push(table.id);
+                        if requests.len() >= batch_size {
+                            enrich_batch(store, &provider, &requests, &ids).await?;
+                            requests.clear();
+                            ids.clear();
+                        }
+                    }
+                    if !requests.is_empty() {
+                        enrich_batch(store, &provider, &requests, &ids).await?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-reembed
+    if auto_reembed {
+        let api_key = embed_api_key
+            .clone()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+
+        if let Some(key) = api_key {
+            let model = embed_model.unwrap_or("text-embedding-3-small");
+            let dimensions = embed_dimensions.unwrap_or(1536);
+            let provider = arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
+                key, model, dimensions,
+            );
+            tracing::info!("running auto-reembed");
+            let all_defs = store.list_all_semantic_definitions().await?;
+            for mut def in all_defs {
+                if def.embedding.is_some() {
+                    let hash = arcana_core::definition_hash(&def.definition);
+                    if def.definition_hash.as_deref() == Some(hash.as_str()) {
+                        continue;
+                    }
+                }
+                let emb = provider.embed(&def.definition).await?;
+                def.embedding = Some(emb);
+                def.definition_hash = Some(arcana_core::definition_hash(&def.definition));
+                store.upsert_semantic_definition(&def).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Write enrichment batch results back to the store (used by background sync).
+async fn enrich_batch(
+    store: &Arc<dyn arcana_core::store::MetadataStore>,
+    provider: &dyn arcana_core::enrichment::EnrichmentProvider,
+    requests: &[arcana_core::enrichment::EnrichmentRequest],
+    entity_ids: &[uuid::Uuid],
+) -> Result<()> {
+    let responses = provider.enrich_batch(requests).await?;
+    for (entity_id, resp) in entity_ids.iter().zip(responses.iter()) {
+        if resp.definition.is_empty() {
+            continue;
+        }
+        use arcana_core::entities::{DefinitionSource, SemanticDefinition, SemanticEntityType};
+        let def = SemanticDefinition {
+            id: uuid::Uuid::new_v4(),
+            entity_id: *entity_id,
+            entity_type: SemanticEntityType::Table,
+            definition: resp.definition.clone(),
+            source: DefinitionSource::LlmInferred,
+            confidence: 0.40,
+            embedding: None,
+            definition_hash: None,
+            confidence_refreshed_at: Some(chrono::Utc::now()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        store.upsert_semantic_definition(&def).await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

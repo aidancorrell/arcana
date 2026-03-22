@@ -22,6 +22,8 @@ config/
 Dockerfile                    # Multi-stage build (rust builder → debian slim runtime)
 docker-compose.yml            # One-command deployment with volume + config
 arcana.docker.toml            # Docker-optimized config template
+.github/workflows/
+  arcana-sync.yml             # GitHub Action: auto-sync on dbt model changes
 sandbox/
   README.md                 # Instructions for local end-to-end testing (committed)
   setup.sh                  # Bootstrap script: clones jaffle-shop, generates dbt artifacts, inits store (committed)
@@ -286,47 +288,46 @@ docker compose up -d
 
 ---
 
-### Phase J — CI/CD Integration (Automated Sync)  ⬜ TODO
+### Phase J — CI/CD Integration (Automated Sync)  ✅ COMPLETE
 
 **Problem:** Metadata goes stale if someone has to remember to run `arcana sync` after dbt changes.
 
 **Solution:** Automated sync triggered by dbt CI events.
 
 **Implementation:**
-- **GitHub Action** (`arcana-sync-action`): runs on push to `main` when `models/` or `schema.yml` changes. Calls `arcana sync --adapter dbt && arcana enrich && arcana reembed` against the shared server.
-- **Webhook endpoint**: `POST /api/sync` on the HTTP server — triggers sync for a given adapter. Secured by API key.
-- **Scheduled sync**: `arcana serve --sync-interval 6h` — background task runs sync + enrich + reembed on a timer.
-- **dbt Cloud webhook**: listens for `job.completed` events, triggers sync automatically.
+- **GitHub Action** (`.github/workflows/arcana-sync.yml`): runs on push to `main` when `models/` or `schema.yml` changes. Calls `POST /api/sync` on the shared server.
+- **Webhook endpoint**: `POST /api/sync` on the admin HTTP server — triggers sync for a given adapter. Secured by `Authorization: Bearer <key>`.
+- **Scheduled sync**: `arcana serve --sync-interval 6h` — background task runs incremental sync + optional enrich + reembed on a timer.
+- **Background sync worker**: Receives triggers from webhook or timer, runs incremental dbt sync, optional auto-enrich, optional auto-reembed.
 
 **Config:**
 ```toml
+[mcp]
+admin_addr = "0.0.0.0:8478"  # admin API on separate port
+
 [sync]
 auto_interval = "6h"         # background sync interval (0 = disabled)
 auto_enrich = true            # run enrich after each sync
 auto_reembed = true           # run reembed after each sync
-webhook_secret = "whsec_..."  # for dbt Cloud webhook validation
+webhook_secret = "whsec_..."  # for webhook authentication
 ```
-
-**Success metric:** Engineer merges a dbt model change, and within minutes the updated metadata is available to all agents via MCP.
 
 ---
 
-### Phase K — Observability & Admin  ⬜ TODO
+### Phase K — Observability & Admin  ✅ COMPLETE
 
 **Problem:** No visibility into what Arcana knows, what's stale, what agents are asking, or whether the system is healthy.
 
-**Solution:** Admin API endpoints and an `arcana status` dashboard.
+**Solution:** Admin API endpoints and an enhanced `arcana status` command.
 
 **Implementation:**
-- **Admin API** (on same HTTP server, under `/api/admin/`):
-  - `GET /api/admin/stats` — entity counts, definition coverage %, stale entity count, index size.
-  - `GET /api/admin/recent-queries` — last N `get_context` calls with query text, result count, latency.
+- **Admin API** (on separate port, under `/api/admin/`):
+  - `GET /api/admin/stats` — entity counts, definition coverage %, embedded count, index size, cluster count.
   - `GET /api/admin/coverage` — per-schema breakdown of tables with/without definitions.
-  - `GET /api/admin/evidence` — recent evidence records (feedback trail).
-- **`arcana status --detailed`** — CLI command that calls the admin API and prints a formatted report.
-- **Prometheus metrics** (optional): request count, latency histogram, cache hit rate, index size gauge.
-
-**Success metric:** Data platform lead can answer "what % of our tables does Arcana know about?" and "what queries are agents running?" without reading the DB.
+  - `GET /api/admin/evidence` — recent evidence records (feedback trail), sorted by date, limited to 100.
+  - `GET /health` — basic health check with version info.
+- **`arcana status --detailed`** — enhanced CLI command showing per-schema coverage, stale entity counts, and confidence distribution histogram.
+- Prometheus metrics deferred (not needed for MVP deployment).
 
 ---
 
@@ -336,8 +337,8 @@ webhook_secret = "whsec_..."  # for dbt Cloud webhook validation
 |-------|------|---------|--------|
 | H — HTTP Transport | Multi-user MCP server | Shared team deployment | ✅ Done |
 | I — Docker | Container image + compose | Easy deployment | ✅ Done |
-| J — CI/CD | Auto-sync on dbt changes | Always-fresh metadata | ⬜ TODO |
-| K — Observability | Admin API + metrics | Operational visibility | ⬜ TODO |
+| J — CI/CD | Auto-sync on dbt changes | Always-fresh metadata | ✅ Done |
+| K — Observability | Admin API + metrics | Operational visibility | ✅ Done |
 
 Phase H is the critical path — without it, Phases I–K have no server to deploy/monitor.
 

@@ -27,3 +27,9 @@ stale_threshold = 0.4
 [mcp]
 bind_addr = "0.0.0.0:8477"
 max_context_tokens = 8000
+admin_addr = "0.0.0.0:8478"
+
+[sync]
+# auto_interval = "6h"
+# auto_enrich = true
+# auto_reembed = true

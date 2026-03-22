@@ -55,6 +55,18 @@ stale_threshold = 0.4
 bind_addr = "127.0.0.1:8477"
 # Max tokens to include in a single context response
 max_context_tokens = 8000
+# Admin API bind address (enables /api/admin/* and /api/sync endpoints)
+# admin_addr = "127.0.0.1:8478"
+
+[sync]
+# Background sync interval (e.g., "6h", "30m", "0" = disabled)
+# auto_interval = "6h"
+# Run `enrich` after each auto-sync
+# auto_enrich = true
+# Run `reembed` after each auto-sync
+# auto_reembed = true
+# Secret for webhook authentication (POST /api/sync)
+# webhook_secret = "whsec_..."
 
 [ingest]
 # Supported document sources

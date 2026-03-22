@@ -62,10 +62,10 @@ WORKDIR /data
 # Default config location — mount or override via env
 ENV ARCANA_CONFIG=/data/arcana.toml
 
-EXPOSE 8477
+EXPOSE 8477 8478
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:8477/sse > /dev/null || exit 1
+    CMD curl -sf http://localhost:8478/health > /dev/null || exit 1
 
 ENTRYPOINT ["arcana"]
 CMD ["--config", "/data/arcana.toml", "serve"]
