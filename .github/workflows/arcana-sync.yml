@@ -1,0 +1,53 @@
+# Arcana Sync — triggers metadata sync when dbt models or schema YAMLs change.
+#
+# Set these repository secrets:
+#   ARCANA_SERVER_URL  — e.g. https://arcana.internal:8478
+#   ARCANA_WEBHOOK_KEY — matches [sync] webhook_secret in arcana.toml
+#
+# Customize the paths filter to match your dbt project structure.
+
+name: Arcana Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "models/**"
+      - "**/*schema*.yml"
+      - "**/*schema*.yaml"
+      - "dbt_project.yml"
+
+  workflow_dispatch:
+    inputs:
+      adapter:
+        description: "Adapter to sync (leave empty for all)"
+        required: false
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger Arcana sync
+        run: |
+          ADAPTER='${{ github.event.inputs.adapter }}'
+          BODY='{}'
+          if [ -n "$ADAPTER" ]; then
+            BODY="{\"adapter\": \"$ADAPTER\"}"
+          fi
+
+          HTTP_CODE=$(curl -s -o /tmp/arcana-response.json -w "%{http_code}" \
+            -X POST "${{ secrets.ARCANA_SERVER_URL }}/api/sync" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.ARCANA_WEBHOOK_KEY }}" \
+            -d "$BODY")
+
+          echo "Response code: $HTTP_CODE"
+          cat /tmp/arcana-response.json
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::error::Arcana sync trigger failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
