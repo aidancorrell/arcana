@@ -13,6 +13,7 @@ use crate::adapter::SyncOutput;
 
 /// Sync schemas, tables, and columns from Snowflake INFORMATION_SCHEMA.
 pub async fn sync_schemas(config: &SnowflakeConfig, data_source_id: Uuid) -> Result<SyncOutput> {
+    config.validate()?;
     let mut client = SnowflakeClient::new(config.clone());
     let mut output = SyncOutput::default();
 
