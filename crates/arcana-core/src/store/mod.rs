@@ -83,6 +83,32 @@ pub trait MetadataStore: Send + Sync {
     async fn get_sync_checksum(&self, adapter: &str, entity_key: &str) -> Result<Option<String>>;
     async fn upsert_sync_checksum(&self, adapter: &str, entity_key: &str, checksum: &str) -> Result<()>;
     async fn list_sync_checksums(&self, adapter: &str) -> Result<Vec<(String, String)>>;
+
+    // --- Batch queries (avoids N+1 in admin API) ---
+    /// Count tables and definition coverage across all schemas in a single query.
+    async fn count_tables_and_coverage(&self) -> Result<TableCoverageStats>;
+    /// List recent evidence records across all entities, ordered by created_at desc.
+    async fn list_recent_evidence(&self, limit: u32) -> Result<Vec<EvidenceRecord>>;
+}
+
+/// Aggregated coverage statistics returned by `count_tables_and_coverage`.
+#[derive(Debug, Default)]
+pub struct TableCoverageStats {
+    pub data_source_count: usize,
+    pub total_tables: usize,
+    pub tables_with_definitions: usize,
+    pub total_columns: usize,
+    pub schema_coverages: Vec<SchemaCoverageRow>,
+}
+
+/// Per-schema coverage row.
+#[derive(Debug)]
+pub struct SchemaCoverageRow {
+    pub data_source_name: String,
+    pub database_name: String,
+    pub schema_name: String,
+    pub total_tables: usize,
+    pub tables_with_definitions: usize,
 }
 
 pub use sqlite::SqliteStore;

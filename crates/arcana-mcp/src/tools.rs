@@ -250,6 +250,14 @@ pub async fn handle_estimate_cost(
     input: EstimateCostInput,
     snowflake_config: Option<Arc<arcana_adapters::snowflake::SnowflakeConfig>>,
 ) -> Result<EstimateCostOutput> {
+    const MAX_SQL_LENGTH: usize = 100_000;
+    if input.sql.len() > MAX_SQL_LENGTH {
+        anyhow::bail!(
+            "SQL query too long ({} bytes, max {MAX_SQL_LENGTH})",
+            input.sql.len()
+        );
+    }
+
     let config = snowflake_config
         .ok_or_else(|| anyhow::anyhow!("Snowflake is not configured — cannot estimate cost"))?;
 

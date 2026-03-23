@@ -26,6 +26,9 @@ reqwest = { version = "=0.12.15", features = ["json"] }
 config = "0.14"
 rmcp = { version = "0.1", features = ["server", "transport-sse-server"] }
 axum = "0.8"
+subtle = "2"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["limit"] }
 sha2 = "0.10"
 bincode = "1"
 regex = "1"
