@@ -159,7 +159,7 @@ impl ArcanaServer {
                         },
                         "required": ["query"]
                     }))
-                    .unwrap(),
+                    .expect("valid tool JSON schema"),
                 ),
             },
             Tool {
@@ -179,7 +179,7 @@ impl ArcanaServer {
                         },
                         "required": ["table_ref"]
                     }))
-                    .unwrap(),
+                    .expect("valid tool JSON schema"),
                 ),
             },
             Tool {
@@ -194,7 +194,7 @@ impl ArcanaServer {
                         },
                         "required": ["sql"]
                     }))
-                    .unwrap(),
+                    .expect("valid tool JSON schema"),
                 ),
             },
             Tool {
@@ -211,7 +211,7 @@ impl ArcanaServer {
                         },
                         "required": ["entity_id", "entity_type", "definition"]
                     }))
-                    .unwrap(),
+                    .expect("valid tool JSON schema"),
                 ),
             },
             Tool {
@@ -229,7 +229,7 @@ impl ArcanaServer {
                         },
                         "required": ["table_ref"]
                     }))
-                    .unwrap(),
+                    .expect("valid tool JSON schema"),
                 ),
             },
             Tool {
@@ -258,7 +258,7 @@ impl ArcanaServer {
                         },
                         "required": ["entity_ids", "outcome"]
                     }))
-                    .unwrap(),
+                    .expect("valid tool JSON schema"),
                 ),
             },
         ]

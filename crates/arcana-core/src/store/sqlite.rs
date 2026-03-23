@@ -1248,6 +1248,98 @@ impl MetadataStore for SqliteStore {
         .await?;
         Ok(rows)
     }
+
+    async fn count_tables_and_coverage(&self) -> Result<super::TableCoverageStats> {
+        use super::{SchemaCoverageRow, TableCoverageStats};
+
+        // Single query joining data_sources → schemas → tables with LEFT JOIN on definitions
+        let rows = sqlx::query(
+            "SELECT ds.name AS ds_name, s.database_name, s.schema_name,
+                    COUNT(DISTINCT t.id) AS total_tables,
+                    COUNT(DISTINCT CASE WHEN sd.id IS NOT NULL THEN t.id END) AS tables_with_defs,
+                    COUNT(DISTINCT c.id) AS total_columns
+             FROM data_sources ds
+             JOIN schemas s ON s.data_source_id = ds.id
+             LEFT JOIN tables t ON t.schema_id = s.id
+             LEFT JOIN semantic_definitions sd ON sd.entity_id = t.id
+             LEFT JOIN columns c ON c.table_id = t.id
+             GROUP BY ds.name, s.database_name, s.schema_name
+             ORDER BY ds.name, s.database_name, s.schema_name"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let data_source_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM data_sources"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let mut stats = TableCoverageStats {
+            data_source_count: data_source_count as usize,
+            ..Default::default()
+        };
+
+        for row in &rows {
+            let ds_name: String = row.get("ds_name");
+            let database_name: String = row.get("database_name");
+            let schema_name: String = row.get("schema_name");
+            let total: i64 = row.get("total_tables");
+            let with_defs: i64 = row.get("tables_with_defs");
+            let columns: i64 = row.get("total_columns");
+
+            stats.total_tables += total as usize;
+            stats.tables_with_definitions += with_defs as usize;
+            stats.total_columns += columns as usize;
+
+            stats.schema_coverages.push(SchemaCoverageRow {
+                data_source_name: ds_name,
+                database_name,
+                schema_name,
+                total_tables: total as usize,
+                tables_with_definitions: with_defs as usize,
+            });
+        }
+
+        Ok(stats)
+    }
+
+    async fn list_recent_evidence(&self, limit: u32) -> Result<Vec<EvidenceRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, entity_id, interaction_id, query_text, outcome, source, confidence_delta, created_at
+             FROM evidence_records
+             ORDER BY created_at DESC
+             LIMIT ?"
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let id_str: String = row.get("id");
+            let entity_str: String = row.get("entity_id");
+            let interaction_str: Option<String> = row.get("interaction_id");
+            let outcome_str: String = row.get("outcome");
+            let source_str: String = row.get("source");
+            let created_str: String = row.get("created_at");
+
+            records.push(EvidenceRecord {
+                id: id_str.parse()?,
+                entity_id: entity_str.parse()?,
+                interaction_id: interaction_str.map(|s| s.parse()).transpose()?,
+                query_text: row.get("query_text"),
+                outcome: EvidenceOutcome::from_str(&outcome_str)
+                    .ok_or_else(|| anyhow::anyhow!("invalid outcome: {outcome_str}"))?,
+                source: EvidenceSource::from_str(&source_str)
+                    .ok_or_else(|| anyhow::anyhow!("invalid source: {source_str}"))?,
+                confidence_delta: row.get("confidence_delta"),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)?.with_timezone(&chrono::Utc),
+            });
+        }
+
+        Ok(records)
+    }
 }
 
 // ---------------------------------------------------------------------------
