@@ -1,3 +1,5 @@
+mod ops;
+
 use anyhow::{Context, Result};
 use arcana_adapters::MetadataAdapter;
 use arcana_core::embeddings::EmbeddingProvider;
@@ -810,78 +812,9 @@ async fn cmd_reembed(
     let store = open_store(cfg).await?;
     let embedding_provider = build_embedding_provider(cfg)?;
 
-    let threshold = below_confidence.unwrap_or(f64::MAX);
-
-    // Re-embed semantic definitions
-    let data_sources = store.list_data_sources().await?;
-    let mut def_count = 0usize;
-
-    for ds in &data_sources {
-        let schemas = store.list_schemas(ds.id).await?;
-        for schema in &schemas {
-            let tables = store.list_tables(schema.id).await?;
-            for table in &tables {
-                let defs = store.get_semantic_definitions(table.id).await?;
-                let mut batch_texts: Vec<String> = Vec::new();
-                let mut batch_defs: Vec<arcana_core::entities::SemanticDefinition> = Vec::new();
-
-                for def in defs {
-                    if def.confidence < threshold {
-                        // Embedding cache: skip if definition text unchanged and embedding exists
-                        let hash = arcana_core::definition_hash(&def.definition);
-                        if def.embedding.is_some()
-                            && def.definition_hash.as_deref() == Some(hash.as_str())
-                        {
-                            continue;
-                        }
-                        batch_texts.push(def.definition.clone());
-                        batch_defs.push(def);
-                    }
-
-                    if batch_texts.len() >= batch_size {
-                        let refs: Vec<&str> =
-                            batch_texts.iter().map(|s| s.as_str()).collect();
-                        let embeddings = embedding_provider.embed_batch(&refs).await?;
-                        for (mut d, emb) in
-                            batch_defs.drain(..).zip(embeddings.into_iter())
-                        {
-                            d.embedding = Some(emb);
-                            d.definition_hash = Some(arcana_core::definition_hash(&d.definition));
-                            store.upsert_semantic_definition(&d).await?;
-                            def_count += 1;
-                        }
-                        batch_texts.clear();
-                    }
-                }
-
-                // Flush remaining batch
-                if !batch_texts.is_empty() {
-                    let refs: Vec<&str> = batch_texts.iter().map(|s| s.as_str()).collect();
-                    let embeddings = embedding_provider.embed_batch(&refs).await?;
-                    for (mut d, emb) in batch_defs.drain(..).zip(embeddings.into_iter()) {
-                        d.embedding = Some(emb);
-                        d.definition_hash = Some(arcana_core::definition_hash(&d.definition));
-                        store.upsert_semantic_definition(&d).await?;
-                        def_count += 1;
-                    }
-                }
-
-                // Also re-embed columns
-                let col_defs = store.list_columns(table.id).await?;
-                for col in &col_defs {
-                    let cdefs = store.get_semantic_definitions(col.id).await?;
-                    for mut cdef in cdefs {
-                        if cdef.confidence < threshold {
-                            let emb = embedding_provider.embed(&cdef.definition).await?;
-                            cdef.embedding = Some(emb);
-                            store.upsert_semantic_definition(&cdef).await?;
-                            def_count += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let def_count =
+        ops::reembed_definitions(&store, &*embedding_provider, below_confidence, batch_size)
+            .await?;
 
     println!("  Re-embedded {} semantic definitions.", def_count);
     println!("Done.");
@@ -903,95 +836,24 @@ async fn cmd_enrich(
     }
     println!("Enriching undescribed entities (batch_size={batch_size})...");
 
+    // Table-level enrichment
+    let (table_requests, table_ids, mut skipped) =
+        ops::collect_table_enrichment_targets(&store, filter).await?;
+
     let mut table_count = 0usize;
+    for chunk in table_requests.chunks(batch_size) {
+        let id_chunk = &table_ids[table_count..table_count + chunk.len()];
+        let count = ops::write_enrichment_batch(&store, &*provider, chunk, id_chunk, dry_run).await?;
+        table_count += count;
+    }
+
+    // Column-level enrichment
     let mut col_count = 0usize;
-    let mut skipped = 0usize;
-
     let data_sources = store.list_data_sources().await?;
-
     for ds in &data_sources {
         let schemas = store.list_schemas(ds.id).await?;
         for schema in &schemas {
             let tables = store.list_tables(schema.id).await?;
-
-            // Collect table-level enrichment requests for this schema
-            let mut table_requests: Vec<arcana_core::enrichment::EnrichmentRequest> = Vec::new();
-            let mut table_ids: Vec<uuid::Uuid> = Vec::new();
-            let mut table_names_for_flush: Vec<String> = Vec::new();
-
-            for table in &tables {
-                // Apply optional name filter
-                if let Some(f) = filter {
-                    if !table.name.contains(f) {
-                        skipped += 1;
-                        continue;
-                    }
-                }
-
-                // Skip if table already has a human-edited or adapter-sourced definition
-                let existing = store.get_semantic_definitions(table.id).await?;
-                let has_good_def = existing.iter().any(|d| {
-                    use arcana_core::entities::DefinitionSource;
-                    matches!(
-                        d.source,
-                        DefinitionSource::Manual | DefinitionSource::DbtYaml | DefinitionSource::SnowflakeComment
-                    )
-                });
-                if has_good_def {
-                    skipped += 1;
-                    continue;
-                }
-
-                let cols = store.list_columns(table.id).await?;
-                let col_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
-
-                // Fetch upstream table names from lineage
-                let upstream_edges = store.get_upstream(table.id).await?;
-                let upstream_tables: Vec<String> = upstream_edges
-                    .iter()
-                    .map(|e| e.upstream_id.to_string())
-                    .collect();
-
-                table_requests.push(arcana_core::enrichment::EnrichmentRequest {
-                    table_name: table.name.clone(),
-                    column_names: col_names,
-                    upstream_tables,
-                    column_name: None,
-                });
-                table_ids.push(table.id);
-                table_names_for_flush.push(table.name.clone());
-
-                // Flush batch when full
-                if table_requests.len() >= batch_size {
-                    let count = flush_enrichment_batch(
-                        &store,
-                        &*provider,
-                        &table_requests,
-                        &table_ids,
-                        dry_run,
-                    )
-                    .await?;
-                    table_count += count;
-                    table_requests.clear();
-                    table_ids.clear();
-                    table_names_for_flush.clear();
-                }
-            }
-
-            // Flush remaining tables
-            if !table_requests.is_empty() {
-                let count = flush_enrichment_batch(
-                    &store,
-                    &*provider,
-                    &table_requests,
-                    &table_ids,
-                    dry_run,
-                )
-                .await?;
-                table_count += count;
-            }
-
-            // Column-level enrichment
             for table in &tables {
                 if let Some(f) = filter {
                     if !table.name.contains(f) {
@@ -1027,14 +889,9 @@ async fn cmd_enrich(
                     col_ids.push(col.id);
 
                     if col_requests.len() >= batch_size {
-                        let count = flush_enrichment_batch(
-                            &store,
-                            &*provider,
-                            &col_requests,
-                            &col_ids,
-                            dry_run,
-                        )
-                        .await?;
+                        let count = ops::write_enrichment_batch(
+                            &store, &*provider, &col_requests, &col_ids, dry_run,
+                        ).await?;
                         col_count += count;
                         col_requests.clear();
                         col_ids.clear();
@@ -1042,14 +899,9 @@ async fn cmd_enrich(
                 }
 
                 if !col_requests.is_empty() {
-                    let count = flush_enrichment_batch(
-                        &store,
-                        &*provider,
-                        &col_requests,
-                        &col_ids,
-                        dry_run,
-                    )
-                    .await?;
+                    let count = ops::write_enrichment_batch(
+                        &store, &*provider, &col_requests, &col_ids, dry_run,
+                    ).await?;
                     col_count += count;
                 }
             }
@@ -1070,62 +922,6 @@ async fn cmd_enrich(
     }
 
     Ok(())
-}
-
-/// Send one batch to the enrichment provider and write results back to the store.
-/// Returns the number of definitions written.
-async fn flush_enrichment_batch(
-    store: &arcana_core::store::SqliteStore,
-    provider: &dyn arcana_core::enrichment::EnrichmentProvider,
-    requests: &[arcana_core::enrichment::EnrichmentRequest],
-    entity_ids: &[uuid::Uuid],
-    dry_run: bool,
-) -> Result<usize> {
-    let responses = provider.enrich_batch(requests).await?;
-    let mut written = 0usize;
-
-    for (entity_id, (req, resp)) in entity_ids.iter().zip(requests.iter().zip(responses.iter())) {
-        if resp.definition.is_empty() {
-            continue;
-        }
-
-        let label = req
-            .column_name
-            .as_deref()
-            .unwrap_or(&req.table_name)
-            .to_string();
-
-        if dry_run {
-            println!("  [dry-run] {label}: {}", &resp.definition[..resp.definition.len().min(80)]);
-        } else {
-            use arcana_core::entities::{DefinitionSource, SemanticDefinition, SemanticEntityType};
-
-            let entity_type = if req.column_name.is_some() {
-                SemanticEntityType::Column
-            } else {
-                SemanticEntityType::Table
-            };
-
-            let def = SemanticDefinition {
-                id: uuid::Uuid::new_v4(),
-                entity_id: *entity_id,
-                entity_type,
-                definition: resp.definition.clone(),
-                source: DefinitionSource::LlmInferred,
-                confidence: 0.40,
-                embedding: None,
-                definition_hash: None,
-                confidence_refreshed_at: Some(chrono::Utc::now()),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            store.upsert_semantic_definition(&def).await?;
-            println!("  enriched {label}");
-        }
-        written += 1;
-    }
-
-    Ok(written)
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,7 +1049,7 @@ async fn run_background_sync(
         );
     }
 
-    // Auto-enrich (simplified — enrich all undescribed tables)
+    // Auto-enrich
     if auto_enrich {
         let api_key = enrichment_api_key
             .clone()
@@ -1269,47 +1065,19 @@ async fn run_background_sync(
                 batch_size,
             );
             tracing::info!("running auto-enrich");
-            // Enrich undescribed tables (simplified version)
-            let data_sources = store.list_data_sources().await?;
-            for ds in &data_sources {
-                let schemas = store.list_schemas(ds.id).await?;
-                for schema in &schemas {
-                    let tables = store.list_tables(schema.id).await?;
-                    let mut requests = Vec::new();
-                    let mut ids = Vec::new();
-                    for table in &tables {
-                        let existing = store.get_semantic_definitions(table.id).await?;
-                        let has_good_def = existing.iter().any(|d| {
-                            use arcana_core::entities::DefinitionSource;
-                            matches!(
-                                d.source,
-                                DefinitionSource::Manual
-                                    | DefinitionSource::DbtYaml
-                                    | DefinitionSource::SnowflakeComment
-                            )
-                        });
-                        if has_good_def {
-                            continue;
-                        }
-                        let cols = store.list_columns(table.id).await?;
-                        let col_names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
-                        requests.push(arcana_core::enrichment::EnrichmentRequest {
-                            table_name: table.name.clone(),
-                            column_names: col_names,
-                            upstream_tables: vec![],
-                            column_name: None,
-                        });
-                        ids.push(table.id);
-                        if requests.len() >= batch_size {
-                            enrich_batch(store, &provider, &requests, &ids).await?;
-                            requests.clear();
-                            ids.clear();
-                        }
-                    }
-                    if !requests.is_empty() {
-                        enrich_batch(store, &provider, &requests, &ids).await?;
-                    }
-                }
+
+            let (requests, ids, _skipped) =
+                ops::collect_table_enrichment_targets(store.as_ref(), None).await?;
+            for chunk_start in (0..requests.len()).step_by(batch_size) {
+                let chunk_end = (chunk_start + batch_size).min(requests.len());
+                ops::write_enrichment_batch(
+                    store.as_ref(),
+                    &provider,
+                    &requests[chunk_start..chunk_end],
+                    &ids[chunk_start..chunk_end],
+                    false,
+                )
+                .await?;
             }
         }
     }
@@ -1327,53 +1095,10 @@ async fn run_background_sync(
                 key, model, dimensions,
             );
             tracing::info!("running auto-reembed");
-            let all_defs = store.list_all_semantic_definitions().await?;
-            for mut def in all_defs {
-                if def.embedding.is_some() {
-                    let hash = arcana_core::definition_hash(&def.definition);
-                    if def.definition_hash.as_deref() == Some(hash.as_str()) {
-                        continue;
-                    }
-                }
-                let emb = provider.embed(&def.definition).await?;
-                def.embedding = Some(emb);
-                def.definition_hash = Some(arcana_core::definition_hash(&def.definition));
-                store.upsert_semantic_definition(&def).await?;
-            }
+            ops::reembed_definitions(store.as_ref(), &provider, None, 100).await?;
         }
     }
 
-    Ok(())
-}
-
-/// Write enrichment batch results back to the store (used by background sync).
-async fn enrich_batch(
-    store: &Arc<dyn arcana_core::store::MetadataStore>,
-    provider: &dyn arcana_core::enrichment::EnrichmentProvider,
-    requests: &[arcana_core::enrichment::EnrichmentRequest],
-    entity_ids: &[uuid::Uuid],
-) -> Result<()> {
-    let responses = provider.enrich_batch(requests).await?;
-    for (entity_id, resp) in entity_ids.iter().zip(responses.iter()) {
-        if resp.definition.is_empty() {
-            continue;
-        }
-        use arcana_core::entities::{DefinitionSource, SemanticDefinition, SemanticEntityType};
-        let def = SemanticDefinition {
-            id: uuid::Uuid::new_v4(),
-            entity_id: *entity_id,
-            entity_type: SemanticEntityType::Table,
-            definition: resp.definition.clone(),
-            source: DefinitionSource::LlmInferred,
-            confidence: 0.40,
-            embedding: None,
-            definition_hash: None,
-            confidence_refreshed_at: Some(chrono::Utc::now()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        store.upsert_semantic_definition(&def).await?;
-    }
     Ok(())
 }
 
@@ -1594,22 +1319,40 @@ async fn upsert_sync_output(
     output: &arcana_adapters::adapter::SyncOutput,
 ) -> Result<()> {
     for schema in &output.schemas {
-        store.upsert_schema(schema).await?;
+        store.upsert_schema(schema).await
+            .with_context(|| format!("upserting schema {}", schema.schema_name))?;
     }
     for table in &output.tables {
-        store.upsert_table(table).await?;
+        store.upsert_table(table).await
+            .with_context(|| format!("upserting table {} (schema_id={})", table.name, table.schema_id))?;
     }
+    let mut col_skipped = 0usize;
     for column in &output.columns {
-        store.upsert_column(column).await?;
+        if let Err(e) = store.upsert_column(column).await {
+            tracing::debug!("skipping column {} (table_id={}): {e}", column.name, column.table_id);
+            col_skipped += 1;
+        }
     }
+    if col_skipped > 0 {
+        tracing::warn!("{col_skipped} columns skipped (missing parent table — likely name collisions from versioned models)");
+    }
+    let mut edge_skipped = 0usize;
     for edge in &output.lineage_edges {
-        store.upsert_lineage_edge(edge).await?;
+        if let Err(e) = store.upsert_lineage_edge(edge).await {
+            tracing::debug!("skipping lineage edge {} -> {}: {e}", edge.upstream_id, edge.downstream_id);
+            edge_skipped += 1;
+        }
+    }
+    if edge_skipped > 0 {
+        tracing::warn!("{edge_skipped} lineage edges skipped (missing referenced tables)");
     }
     for def in &output.semantic_definitions {
-        store.upsert_semantic_definition(def).await?;
+        store.upsert_semantic_definition(def).await
+            .with_context(|| format!("upserting definition for entity {}", def.entity_id))?;
     }
     for metric in &output.metrics {
-        store.upsert_metric(metric).await?;
+        store.upsert_metric(metric).await
+            .with_context(|| format!("upserting metric {}", metric.name))?;
     }
     Ok(())
 }

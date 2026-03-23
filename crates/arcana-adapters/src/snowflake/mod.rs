@@ -24,6 +24,33 @@ pub struct SnowflakeConfig {
     pub role: Option<String>,
 }
 
+impl SnowflakeConfig {
+    /// Validate that all identifier fields are safe for use in SQL statements.
+    /// Snowflake identifiers must match `[a-zA-Z0-9_.-]` to prevent SQL injection.
+    pub fn validate(&self) -> Result<()> {
+        validate_identifier(&self.database, "database")?;
+        validate_identifier(&self.schema, "schema")?;
+        validate_identifier(&self.warehouse, "warehouse")?;
+        validate_identifier(&self.account, "account")?;
+        validate_identifier(&self.user, "user")?;
+        Ok(())
+    }
+}
+
+/// Validate a Snowflake identifier against allowed characters.
+fn validate_identifier(value: &str, field_name: &str) -> Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("Snowflake {field_name} cannot be empty");
+    }
+    if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-') {
+        anyhow::bail!(
+            "Invalid Snowflake {field_name}: '{}' — must contain only [a-zA-Z0-9_.-]",
+            value
+        );
+    }
+    Ok(())
+}
+
 /// Snowflake metadata adapter.
 pub struct SnowflakeAdapter {
     config: SnowflakeConfig,

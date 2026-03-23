@@ -35,3 +35,4 @@ dist/
 sandbox/*
 !sandbox/README.md
 !sandbox/setup.sh
+!sandbox/setup-gitlab.sh
