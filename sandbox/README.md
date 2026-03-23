@@ -85,6 +85,49 @@ Ask Claude these queries with and without Arcana:
 
 ---
 
+## Scale Test (GitLab Analytics — 3,400+ models)
+
+GitLab's production dbt project is public and makes an excellent stress test for Arcana.
+
+### 1. Run the setup script
+
+```bash
+cd sandbox/
+./setup-gitlab.sh
+```
+
+This will:
+- Clone [gitlab-data/analytics](https://gitlab.com/gitlab-data/analytics) (shallow)
+- Patch out private package dependencies
+- Generate `target/manifest.json` via `dbt parse` with stub profiles (~2 min)
+- Create `arcana-gitlab.toml` and initialize `arcana-gitlab.db`
+
+**Stats:** 3,473 models (2,577 with descriptions), 28,535 columns (19,312 with descriptions), 1,467 sources.
+
+### 2. Sync, enrich, embed
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+cargo run --bin arcana -- --config sandbox/arcana-gitlab.toml sync --adapter dbt
+cargo run --bin arcana -- --config sandbox/arcana-gitlab.toml status --detailed
+cargo run --bin arcana -- --config sandbox/arcana-gitlab.toml enrich --dry-run
+cargo run --bin arcana -- --config sandbox/arcana-gitlab.toml reembed
+```
+
+### 3. Test queries
+
+| Question | Expected domain |
+|----------|----------------|
+| "monthly recurring revenue by product tier" | ARR/subscription models |
+| "customer churn rate" | retention, subscription lifecycle |
+| "CI pipeline duration trends" | gitlab_dotcom CI tables |
+| "merge request cycle time" | gitlab_dotcom MR models |
+| "namespace storage usage" | product usage models |
+
+---
+
 ## Using your own dbt project
 
 Edit `sandbox/arcana.toml` and change `[dbt] project_path` to point at your project. Make sure you've run `dbt parse` (and optionally `dbt docs generate`) so `target/manifest.json` exists.
@@ -93,9 +136,13 @@ Edit `sandbox/arcana.toml` and change `[dbt] project_path` to point at your proj
 
 ```
 sandbox/
-  README.md          # This file (committed)
-  setup.sh           # Bootstrap script (committed)
-  arcana.toml        # Local config (gitignored)
-  arcana.db          # SQLite store (gitignored)
-  jaffle-shop/       # Cloned dbt project (gitignored)
+  README.md              # This file (committed)
+  setup.sh               # Bootstrap: jaffle-shop (committed)
+  setup-gitlab.sh        # Bootstrap: GitLab analytics (committed)
+  arcana.toml            # Config for jaffle-shop (gitignored)
+  arcana-gitlab.toml     # Config for GitLab (gitignored)
+  arcana.db              # SQLite store — jaffle-shop (gitignored)
+  arcana-gitlab.db       # SQLite store — GitLab (gitignored)
+  jaffle-shop/           # Cloned dbt project (gitignored)
+  gitlab-analytics/      # Cloned GitLab repo (gitignored)
 ```
