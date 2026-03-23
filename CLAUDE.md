@@ -2,7 +2,7 @@
 
 Agent-first data catalog. MCP is the primary interface. The thesis: text-to-SQL accuracy jumps from ~20% to 92%+ when an agent knows which tables matter, what columns mean, and what business rules apply.
 
-Architecture doc: see `catalog-architecture-v2.md` (kept locally, not committed).
+Architecture doc: see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
