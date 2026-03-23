@@ -1319,22 +1319,40 @@ async fn upsert_sync_output(
     output: &arcana_adapters::adapter::SyncOutput,
 ) -> Result<()> {
     for schema in &output.schemas {
-        store.upsert_schema(schema).await?;
+        store.upsert_schema(schema).await
+            .with_context(|| format!("upserting schema {}", schema.schema_name))?;
     }
     for table in &output.tables {
-        store.upsert_table(table).await?;
+        store.upsert_table(table).await
+            .with_context(|| format!("upserting table {} (schema_id={})", table.name, table.schema_id))?;
     }
+    let mut col_skipped = 0usize;
     for column in &output.columns {
-        store.upsert_column(column).await?;
+        if let Err(e) = store.upsert_column(column).await {
+            tracing::debug!("skipping column {} (table_id={}): {e}", column.name, column.table_id);
+            col_skipped += 1;
+        }
     }
+    if col_skipped > 0 {
+        tracing::warn!("{col_skipped} columns skipped (missing parent table — likely name collisions from versioned models)");
+    }
+    let mut edge_skipped = 0usize;
     for edge in &output.lineage_edges {
-        store.upsert_lineage_edge(edge).await?;
+        if let Err(e) = store.upsert_lineage_edge(edge).await {
+            tracing::debug!("skipping lineage edge {} -> {}: {e}", edge.upstream_id, edge.downstream_id);
+            edge_skipped += 1;
+        }
+    }
+    if edge_skipped > 0 {
+        tracing::warn!("{edge_skipped} lineage edges skipped (missing referenced tables)");
     }
     for def in &output.semantic_definitions {
-        store.upsert_semantic_definition(def).await?;
+        store.upsert_semantic_definition(def).await
+            .with_context(|| format!("upserting definition for entity {}", def.entity_id))?;
     }
     for metric in &output.metrics {
-        store.upsert_metric(metric).await?;
+        store.upsert_metric(metric).await
+            .with_context(|| format!("upserting metric {}", metric.name))?;
     }
     Ok(())
 }
