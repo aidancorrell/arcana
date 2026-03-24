@@ -1,7 +1,10 @@
 [package]
 name = "arcana-adapters"
-version = "0.1.0"
-edition = "2021"
+description = "Structured metadata adapters (Snowflake, dbt) for Arcana"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 arcana-core = { path = "../arcana-core" }

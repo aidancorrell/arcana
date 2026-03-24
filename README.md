@@ -1,45 +1,25 @@
 # Arcana
 
-A semantic metadata layer for data warehouses — giving AI agents structured, confident, always-fresh context about your data.
+An MCP server that gives AI agents semantic context about your data warehouse — so they write correct SQL on the first try.
 
-## Overview
+Text-to-SQL accuracy jumps from ~20% to 92%+ when agents know which tables matter, what columns mean, and what business rules apply. Arcana indexes your dbt project and Snowflake schema into a semantic search layer, then serves the right context to any MCP-compatible agent (Claude Code, Cursor, Copilot).
 
-Arcana sits between your data infrastructure (Snowflake, dbt) and your AI agents (Claude, GPT-4, Cursor). It maintains a living metadata graph: tables, columns, semantic definitions, data contracts, lineage, usage patterns, and documents — all with confidence scores and automatic decay.
+## Features
 
-## Architecture
+| Feature | Description |
+|---------|-------------|
+| **Hybrid search** | BM25 full-text + vector cosine similarity, fused via Reciprocal Rank Fusion |
+| **Confidence scoring** | Every definition has a trust score that decays over time unless refreshed |
+| **Lineage expansion** | Search results include upstream/downstream tables automatically |
+| **Auto-enrichment** | LLM-generated descriptions for undocumented tables and columns |
+| **Feedback loop** | Agents report query outcomes; successful definitions get boosted |
+| **Redundancy detection** | Semantic clustering to surface duplicate tables |
+| **Cost estimation** | Pre-execution Snowflake EXPLAIN-based cost estimates |
+| **Document ingestion** | Index Markdown docs, runbooks, and data dictionaries |
 
-```
-arcana/
-├── crates/
-│   ├── arcana-core          # Metadata store, entity types, embedding index, confidence system
-│   ├── arcana-adapters      # Structured metadata adapters (Snowflake, dbt)
-│   ├── arcana-documents     # Document ingestion pipeline (Markdown, Confluence, etc.)
-│   ├── arcana-recommender   # Context recommendation engine for AI agents
-│   ├── arcana-mcp           # MCP server (Model Context Protocol)
-│   └── arcana-cli           # CLI binary
-├── config/
-│   └── arcana.example.toml  # Example configuration
-└── README.md
-```
+## Quick Start
 
-### Core Concepts
-
-- **Entities**: Tables, columns, semantic definitions, data contracts, lineage edges, usage records
-- **Confidence Scoring**: Every piece of metadata has a confidence score (0.0–1.0) that decays over time unless refreshed
-- **Embedding Index**: All entities are embedded for semantic search; documents are chunked and linked to entities
-- **MCP Server**: Exposes `get_context`, `describe_table`, `estimate_cost`, and `update_context` tools for AI agents
-- **Adapters**: Pull structured metadata from Snowflake INFORMATION_SCHEMA and dbt manifest/catalog JSON
-
-## Getting Started
-
-### Prerequisites
-
-- Rust 1.78+
-- A Snowflake account (for the Snowflake adapter)
-- A dbt project (for the dbt adapter)
-- OpenAI API key (for embeddings)
-
-### Installation
+### Option 1: Build from source
 
 ```bash
 git clone https://github.com/aidancorrell/arcana
@@ -47,51 +27,125 @@ cd arcana
 cargo build --release
 ```
 
-### Configuration
+### Option 2: Docker
 
 ```bash
+docker compose up -d
+```
+
+This starts Arcana with HTTP/SSE transport on port 8477 — multiple engineers can share one instance.
+
+### Initialize and sync
+
+```bash
+# Create a minimal config (see below)
 cp config/arcana.example.toml arcana.toml
-# Edit arcana.toml with your credentials
-```
 
-### Usage
-
-```bash
 # Initialize the metadata store
-arcana init
+arcana --config arcana.toml init
 
-# Sync metadata from Snowflake + dbt
-arcana sync
+# Sync from your dbt project
+arcana --config arcana.toml sync --adapter dbt
 
-# Ingest documents (Markdown, etc.)
-arcana ingest ./docs/
+# Embed all definitions for semantic search
+arcana --config arcana.toml reembed
 
-# Start the MCP server
-arcana serve
-
-# Ask a question (semantic search)
-arcana ask "what does the orders table contain?"
-
-# Show sync status and confidence scores
-arcana status
+# Test it
+arcana --config arcana.toml ask "monthly revenue by region"
 ```
+
+### Connect to Claude Code
+
+Add to your Claude Code MCP config (`~/.claude.json` or project settings):
+
+```json
+{
+  "mcpServers": {
+    "arcana": {
+      "command": "/path/to/arcana",
+      "args": ["--config", "/path/to/arcana.toml", "serve", "--stdio"]
+    }
+  }
+}
+```
+
+## Minimal Configuration
+
+```toml
+[database]
+url = "sqlite://arcana.db"
+
+[embeddings]
+provider = "openai"
+openai_api_key = "sk-..."  # or set OPENAI_API_KEY env var
+openai_model = "text-embedding-3-small"
+dimensions = 1536
+
+[dbt]
+project_path = "./my-dbt-project"
+```
+
+That's it. Snowflake, enrichment, sync, and MCP sections are all optional. See [`config/arcana.example.toml`](config/arcana.example.toml) for the full reference.
+
+## CLI Commands
+
+```
+arcana init         Initialize the metadata store
+arcana sync         Sync metadata from dbt and/or Snowflake
+arcana ingest       Ingest Markdown documents
+arcana reembed      Embed (or re-embed) all semantic definitions
+arcana enrich       Generate LLM descriptions for undocumented entities
+arcana ask          Semantic search from the command line
+arcana dedup        Detect redundant/duplicate tables
+arcana status       Show entity counts and definition coverage
+arcana serve        Start MCP server (--stdio for local, HTTP for team)
+```
+
+## MCP Tools
+
+When connected as an MCP server, Arcana exposes:
+
+| Tool | What it does |
+|------|-------------|
+| `get_context` | Semantic search — returns relevant tables, columns, and definitions for a query |
+| `describe_table` | Full metadata for a specific table including columns, definitions, and lineage |
+| `estimate_cost` | Pre-execution Snowflake cost estimate for a SQL query |
+| `update_context` | Push corrections or new definitions back into the store |
+| `find_similar_tables` | Find duplicate or near-duplicate tables via semantic similarity |
+| `report_outcome` | Report query success/failure to adjust confidence scores |
+
+## Architecture
+
+Arcana is a Rust workspace with 6 crates:
+
+```
+arcana-core          Metadata store, entity types, embedding index, confidence system
+arcana-adapters      Snowflake + dbt metadata adapters
+arcana-documents     Document ingestion pipeline (Markdown)
+arcana-recommender   Context ranker + token-budget-aware serializer
+arcana-mcp           MCP server (stdio + HTTP/SSE transports)
+arcana-cli           CLI binary wiring everything together
+```
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design document.
 
 ## Development
 
 ```bash
-# Run tests
-cargo test --workspace
-
-# Check all crates
+cargo test --workspace    # 30+ tests, no API keys needed
 cargo check --workspace
-
-# Format
 cargo fmt --all
-
-# Lint
 cargo clippy --workspace
 ```
 
+### Sandbox testing
+
+```bash
+cd sandbox && ./setup.sh  # Clones jaffle-shop, generates dbt artifacts, inits store
+```
+
+For scale testing with 3,400+ models, see [`sandbox/README.md`](sandbox/README.md).
+
 ## License
 
-MIT
+[MIT](LICENSE)

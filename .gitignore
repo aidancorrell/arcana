@@ -21,6 +21,8 @@ Thumbs.db
 
 # SQLite databases
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
@@ -36,3 +38,7 @@ sandbox/*
 !sandbox/README.md
 !sandbox/setup.sh
 !sandbox/setup-gitlab.sh
+
+# Frontend — keep source, ignore generated data
+frontend/node_modules/
+frontend/public/data/

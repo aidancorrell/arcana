@@ -1,7 +1,10 @@
 [package]
 name = "arcana-cli"
-version = "0.1.0"
-edition = "2021"
+description = "CLI binary for Arcana — the agent-first data catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "arcana"
