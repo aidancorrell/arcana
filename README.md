@@ -1,8 +1,10 @@
 # Arcana
 
-An MCP server that gives AI agents semantic context about your data warehouse — so they write correct SQL on the first try.
+An agent-first data catalog that gives AI the context to write correct SQL on the first try.
 
-Text-to-SQL accuracy jumps from ~20% to 92%+ when agents know which tables matter, what columns mean, and what business rules apply. Arcana indexes your dbt project and Snowflake schema into a semantic search layer, then serves the right context to any MCP-compatible agent (Claude Code, Cursor, Copilot).
+Text-to-SQL accuracy jumps from ~20% to 92%+ when agents know which tables matter, what columns mean, and what business rules apply. Arcana builds a semantic knowledge layer over your data warehouse — indexing table schemas, column definitions, lineage graphs, and business documentation into a unified search index — then serves exactly the right context to any MCP-compatible agent (Claude Code, Cursor, Copilot, or any custom toolchain).
+
+Written in Rust for single-binary deployment, sub-millisecond search latency, and zero runtime dependencies. Token-minimal by design — the recommender returns only the highest-relevance context within a configurable budget, so agents spend tokens on reasoning, not sifting through schema dumps. Adapter-based architecture means Arcana works with any warehouse (Snowflake, BigQuery, Databricks) and any modeling framework (dbt, LookML, raw DDL) — ship one adapter and the entire platform lights up. SQLite-backed for zero-ops local use; deploy as a shared HTTP/SSE server when the team is ready.
 
 ## Features
 
