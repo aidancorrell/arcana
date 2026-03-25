@@ -1088,15 +1088,19 @@ async fn run_background_sync(
             .clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok());
 
-        if let Some(key) = api_key {
+        let provider: Box<dyn arcana_core::embeddings::EmbeddingProvider> = if let Some(key) = api_key {
             let model = embed_model.unwrap_or("text-embedding-3-small");
             let dimensions = embed_dimensions.unwrap_or(1536);
-            let provider = arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
+            Box::new(arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
                 key, model, dimensions,
-            );
-            tracing::info!("running auto-reembed");
-            ops::reembed_definitions(store.as_ref(), &provider, None, 100).await?;
-        }
+            ))
+        } else {
+            let dimensions = embed_dimensions.unwrap_or(384);
+            tracing::info!("auto-reembed: no OpenAI key, using local embedding provider");
+            Box::new(arcana_core::embeddings::LocalEmbeddingProvider::new(dimensions))
+        };
+        tracing::info!("running auto-reembed");
+        ops::reembed_definitions(store.as_ref(), provider.as_ref(), None, 100).await?;
     }
 
     Ok(())
@@ -1156,19 +1160,33 @@ fn build_embedding_provider(
         .embeddings
         .openai_api_key
         .clone()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .context("OpenAI API key required — set embeddings.openai_api_key in config or OPENAI_API_KEY env var")?;
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
 
-    let model = cfg
-        .embeddings
-        .openai_model
-        .as_deref()
-        .unwrap_or("text-embedding-3-small");
-    let dimensions = cfg.embeddings.dimensions.unwrap_or(1536);
-
-    Ok(Arc::new(arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
-        api_key, model, dimensions,
-    )))
+    match api_key {
+        Some(key) => {
+            let model = cfg
+                .embeddings
+                .openai_model
+                .as_deref()
+                .unwrap_or("text-embedding-3-small");
+            let dimensions = cfg.embeddings.dimensions.unwrap_or(1536);
+            Ok(Arc::new(arcana_core::embeddings::openai::OpenAiEmbeddingProvider::new(
+                key, model, dimensions,
+            )))
+        }
+        None => {
+            let dimensions = cfg.embeddings.dimensions.unwrap_or(384);
+            tracing::warn!(
+                "No OpenAI API key found — using local n-gram hash embeddings ({dimensions}d). \
+                 Set OPENAI_API_KEY or embeddings.openai_api_key for higher quality embeddings."
+            );
+            println!(
+                "Warning: Using local embedding provider (no OpenAI API key). \
+                 Quality will be lower than neural embeddings."
+            );
+            Ok(Arc::new(arcana_core::embeddings::LocalEmbeddingProvider::new(dimensions)))
+        }
+    }
 }
 
 async fn cmd_dedup(cfg: &AppConfig, threshold: f64, dry_run: bool) -> Result<()> {
