@@ -98,15 +98,16 @@ fn extract_title(content: &str) -> Option<String> {
 
 /// Compute SHA-256 hex digest of a string (for change detection).
 fn sha256_hex(content: &str) -> String {
+    use sha2::{Sha256, Digest};
+    let hash = Sha256::digest(content.as_bytes());
+    hex_encode(&hash)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    // Simple FNV-1a hash as a stand-in (no crypto dependency needed for content change detection).
-    // Replace with sha2 crate if cryptographic integrity is needed.
-    let mut hash: u64 = 14695981039346656037;
-    for byte in content.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(s, "{byte:02x}").unwrap();
     }
-    let mut s = String::with_capacity(16);
-    write!(s, "{hash:016x}").unwrap();
     s
 }

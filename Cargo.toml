@@ -38,4 +38,6 @@ tower-http = { version = "0.6", features = ["limit"] }
 sha2 = "0.10"
 bincode = "1"
 regex = "1"
+jsonwebtoken = "9"
+base64 = "0.22"
 

@@ -19,27 +19,27 @@ Known shortcuts and intentional simplifications in the current codebase, with re
 
 ---
 
-## Snowflake Auth — Password / Session Token
+## Snowflake Auth — Key-Pair JWT  :white_check_mark: IMPLEMENTED
 
-**File:** `crates/arcana-adapters/src/snowflake/client.rs:9-10`
+**File:** `crates/arcana-adapters/src/snowflake/client.rs`
 
-**Current:** Basic username/password authentication via a session token.
+**Previous:** Basic username/password authentication via a session token.
 
-**Limitation:** Password auth is less secure and doesn't support SSO, MFA, or fine-grained rotation.
+**Current:** The Snowflake client now supports both authentication methods:
+1. **Key-pair JWT** (preferred) — when `private_key_path` is set in `SnowflakeConfig`, the client generates RS256-signed JWTs with Snowflake's required claims (issuer with SHA-256 public key thumbprint, subject as `ACCOUNT.USER`). No password needed.
+2. **Password / session token** (fallback) — the original auth method, used when no private key is configured.
 
-**Recommended upgrade:** Key-pair JWT authentication — Snowflake's recommended method for service accounts. Avoids passwords in config entirely.
+Auth method is selected automatically based on config. Set `private_key_path` to your PKCS#8 PEM file to use JWT.
 
 ---
 
-## Content Hashing — FNV-1a (Non-Cryptographic)
+## Content Hashing — SHA-256  :white_check_mark: IMPLEMENTED
 
-**File:** `crates/arcana-documents/src/sources/markdown.rs:102-103`
+**File:** `crates/arcana-documents/src/sources/markdown.rs`
 
-**Current:** FNV-1a hash used for change detection on ingested Markdown documents. Fast, no extra dependencies.
+**Previous:** FNV-1a hash used for change detection on ingested Markdown documents.
 
-**Limitation:** Not cryptographically secure — trivially collidable if an attacker can control document content. Fine for change detection, not for integrity guarantees.
-
-**Recommended upgrade:** Replace with `sha2` crate (SHA-256) if documents come from untrusted sources or if hash integrity is a compliance requirement.
+**Current:** Replaced with proper SHA-256 hashing via the `sha2` crate. Produces a 64-character hex digest for each document, suitable for both change detection and integrity verification.
 
 ---
 
@@ -55,24 +55,29 @@ Known shortcuts and intentional simplifications in the current codebase, with re
 
 ---
 
-## Embedding Provider — OpenAI Only
+## Embedding Provider — Local Fallback  :white_check_mark: IMPLEMENTED
 
-**File:** `crates/arcana-core/src/embeddings/`
+**File:** `crates/arcana-core/src/embeddings/local.rs`
 
-**Current:** Single implementation (`OpenAiEmbeddingProvider`) using `text-embedding-3-small`. The `EmbeddingProvider` trait is already abstracted.
+**Previous:** Single implementation (`OpenAiEmbeddingProvider`) using `text-embedding-3-small`. Hard dependency on OpenAI API.
 
-**Limitation:** Hard dependency on OpenAI API availability and pricing. Air-gapped or self-hosted deployments can't use it.
+**Current:** Added `LocalEmbeddingProvider` as a zero-dependency fallback. Uses character n-gram hashing to produce fixed-dimension vectors with L2 normalization. The CLI and auto-reembed now automatically fall back to the local provider when no `OPENAI_API_KEY` is set.
 
-**Recommended upgrade:** Add a local embedding provider (e.g., via `fastembed-rs` or `candle`) as a fallback. The trait is already in place — it's purely an additional implementation.
+The local provider is suitable for:
+- Air-gapped or self-hosted deployments
+- Development and testing without API credits
+- Fallback when the primary provider is unavailable
+
+For production quality, neural embeddings (OpenAI) are still recommended. The `EmbeddingProvider` trait remains the extension point for additional implementations.
 
 ---
 
 ## Summary Table
 
-| Area | Current | Upgrade Path |
-|------|---------|-------------|
-| Vector search | O(n) flat scan, ≤100k vectors | HNSW (usearch) or external vector DB |
-| Snowflake auth | Password / session token | Key-pair JWT |
-| Content hashing | FNV-1a | SHA-256 (sha2 crate) |
-| Metadata store | SQLite (single-writer) | PostgreSQL (concurrent, replication) |
-| Embedding provider | OpenAI only | Add local fallback (fastembed-rs) |
+| Area | Current | Status |
+|------|---------|--------|
+| Vector search | O(n) flat scan, ≤100k vectors | Upgrade to HNSW when needed |
+| Snowflake auth | Key-pair JWT + password fallback | :white_check_mark: Done |
+| Content hashing | SHA-256 (sha2 crate) | :white_check_mark: Done |
+| Metadata store | SQLite (single-writer) | Upgrade to PostgreSQL when needed |
+| Embedding provider | OpenAI + local fallback | :white_check_mark: Done |
