@@ -1,6 +1,6 @@
 # Arcana — Implementation Guide
 
-Agent-first data catalog. MCP is the primary interface. The thesis: text-to-SQL accuracy jumps from ~20% to 92%+ when an agent knows which tables matter, what columns mean, and what business rules apply.
+Agent-first data catalog. MCP is the primary interface. The thesis: text-to-SQL accuracy improves dramatically when an agent knows which tables matter, what columns mean, and what business rules apply.
 
 Architecture doc: see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
