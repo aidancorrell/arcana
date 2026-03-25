@@ -14,7 +14,7 @@ This isn't a catalog that "also has an API." It's an API that also has a catalog
 
 ## Why This Wins
 
-**The accuracy gap is the business case.** Text-to-SQL accuracy jumps from ~20% to 92-100% when a semantic layer provides context. Every AI-data interaction today is bottlenecked by the same problem: the agent doesn't know which tables matter, what the columns mean, or what business rules apply. Arcana solves that by unifying fragmented metadata and serving it in a token-efficient, agent-optimized format.
+**The accuracy gap is the business case.** Text-to-SQL accuracy improves dramatically when a semantic layer provides context. Every AI-data interaction today is bottlenecked by the same problem: the agent doesn't know which tables matter, what the columns mean, or what business rules apply. Arcana solves that by unifying fragmented metadata and serving it in a token-efficient, agent-optimized format.
 
 **The fragmentation is the moat.** Semantic definitions live across dbt YAML, Snowflake comments, LookML, Cube data models, Confluence pages, Google Docs, Slack threads, and tribal knowledge. No tool unifies these. Arcana becomes the single source of truth that agents call before writing any query.
 
