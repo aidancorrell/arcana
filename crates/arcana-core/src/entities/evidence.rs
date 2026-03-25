@@ -29,7 +29,7 @@ impl EvidenceOutcome {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "success" => Some(Self::Success),
             "failure" => Some(Self::Failure),
@@ -54,7 +54,7 @@ impl EvidenceSource {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "agent_feedback" => Some(Self::AgentFeedback),
             "query_history" => Some(Self::QueryHistory),

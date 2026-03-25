@@ -2,7 +2,6 @@ mod ops;
 
 use anyhow::{Context, Result};
 use arcana_adapters::MetadataAdapter;
-use arcana_core::embeddings::EmbeddingProvider;
 use arcana_core::store::MetadataStore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -172,6 +171,7 @@ impl Default for DatabaseConfig {
 
 #[derive(Debug, serde::Deserialize, Default)]
 struct EmbeddingsConfig {
+    #[allow(dead_code)]
     provider: Option<String>,
     openai_api_key: Option<String>,
     openai_model: Option<String>,
@@ -353,7 +353,7 @@ async fn cmd_sync(cfg: &AppConfig, adapter_filter: Option<&str>, full: bool) -> 
     let store = Arc::new(open_store(cfg).await?);
 
     let should_run = |name: &str| -> bool {
-        adapter_filter.map_or(true, |f| f == name)
+        adapter_filter.is_none_or(|f| f == name)
     };
 
     let mut total_tables = 0usize;
@@ -934,14 +934,14 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
     if s == "0" || s.is_empty() {
         return None;
     }
-    let (num_str, unit) = if s.ends_with('d') {
-        (&s[..s.len() - 1], 'd')
-    } else if s.ends_with('h') {
-        (&s[..s.len() - 1], 'h')
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], 'm')
-    } else if s.ends_with('s') {
-        (&s[..s.len() - 1], 's')
+    let (num_str, unit) = if let Some(n) = s.strip_suffix('d') {
+        (n, 'd')
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 'h')
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 'm')
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 's')
     } else {
         return None;
     };
@@ -958,6 +958,7 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
 
 /// Background worker that listens for sync triggers (from webhook or timer)
 /// and runs sync + optional enrich + reembed.
+#[allow(clippy::too_many_arguments)]
 async fn background_sync_worker(
     mut rx: tokio::sync::mpsc::Receiver<()>,
     store: Arc<dyn arcana_core::store::MetadataStore>,
@@ -994,6 +995,7 @@ async fn background_sync_worker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_background_sync(
     store: &Arc<dyn arcana_core::store::MetadataStore>,
     dbt_cfg: &Option<DbtSectionConfig>,

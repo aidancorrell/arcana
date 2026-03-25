@@ -35,7 +35,7 @@ pub async fn parse_semantic_models(yaml_path: &Path) -> Result<Vec<Metric>> {
             source_table_id: None, // resolve after table sync
             expression: m.measure.map(|ms| ms.name),
             dimensions: m.dimensions.unwrap_or_default(),
-            filters: m.filter.map(|f| serde_json::Value::String(f)),
+            filters: m.filter.map(serde_json::Value::String),
             confidence: 1.0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

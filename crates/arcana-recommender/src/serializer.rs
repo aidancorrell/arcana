@@ -1,6 +1,6 @@
 use arcana_core::entities::{Column, LineageEdge, SemanticDefinition, Table};
 
-use crate::ranker::{ContextItem, ContextResult};
+use crate::ranker::ContextResult;
 
 /// Serializes a `ContextResult` into a token-efficient string representation
 /// suitable for inclusion in an LLM context window.

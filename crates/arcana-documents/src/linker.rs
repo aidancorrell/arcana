@@ -1,4 +1,3 @@
-use anyhow::Result;
 use arcana_core::entities::{DocumentChunk, EntityLink, LinkedEntityType, LinkMethod};
 use uuid::Uuid;
 
@@ -17,7 +16,8 @@ pub struct EntityCandidate {
 pub struct EntityLinker {
     /// Known entities to link against.
     candidates: Vec<EntityCandidate>,
-    /// Confidence threshold for fuzzy matches.
+    /// Confidence threshold for fuzzy matches (reserved for future use).
+    #[allow(dead_code)]
     fuzzy_threshold: f64,
 }
 

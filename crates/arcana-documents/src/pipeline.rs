@@ -1,7 +1,7 @@
 use anyhow::Result;
 use arcana_core::{
     embeddings::EmbeddingProvider,
-    entities::{Document, DocumentChunk, EntityLink},
+    entities::{Document, DocumentChunk},
     store::MetadataStore,
 };
 use std::sync::Arc;
