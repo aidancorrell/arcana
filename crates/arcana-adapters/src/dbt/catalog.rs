@@ -108,7 +108,7 @@ pub async fn enrich_from_catalog(catalog_path: &Path, output: &mut SyncOutput) -
 
         // Enrich columns with data_type from catalog
         let table_id = table.id;
-        for (_, catalog_col) in &catalog_node.columns {
+        for catalog_col in catalog_node.columns.values() {
             let col_key = (table_id, catalog_col.name.to_lowercase());
             if let Some(&col_idx) = col_index_by_key.get(&col_key) {
                 if let Some(data_type) = &catalog_col.data_type {

@@ -2,7 +2,7 @@ use anyhow::Result;
 use arcana_core::{
     confidence::ConfidenceDecay,
     embeddings::{EmbeddingProvider, VectorIndex},
-    entities::{Column, DocumentChunk, LineageEdge, SemanticDefinition, Table},
+    entities::LineageEdge,
     store::MetadataStore,
 };
 use std::collections::{HashMap, HashSet};

@@ -304,7 +304,7 @@ pub fn column_index(metadata: &ResultSetMetadata, name: &str) -> Option<usize> {
 /// For private key PEMs, we look for an accompanying public key section,
 /// or fall back to hashing the full PEM-decoded private key DER.
 fn extract_public_key_der(pem_bytes: &[u8]) -> Result<Vec<u8>> {
-    use base64::Engine;
+    
 
     let pem_str = std::str::from_utf8(pem_bytes)
         .context("PEM file is not valid UTF-8")?;

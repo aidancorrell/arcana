@@ -124,7 +124,7 @@ pub async fn parse_manifest_incremental(
     let mut changed_checksums: Vec<(String, String)> = Vec::new();
 
     // Process nodes (models and snapshots)
-    for (_, node) in &manifest.nodes {
+    for node in manifest.nodes.values() {
         if node.resource_type != "model" && node.resource_type != "snapshot" {
             continue;
         }
@@ -210,7 +210,7 @@ pub async fn parse_manifest_incremental(
     }
 
     // Process sources (external tables)
-    for (_, source) in &manifest.sources {
+    for source in manifest.sources.values() {
         let db = source
             .database
             .clone()
@@ -275,7 +275,7 @@ pub async fn parse_manifest_incremental(
     }
 
     // Resolve lineage edges now that all table IDs are known
-    for (_, node) in &manifest.nodes {
+    for node in manifest.nodes.values() {
         if node.resource_type != "model" && node.resource_type != "snapshot" {
             continue;
         }

@@ -1,17 +1,13 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions}};
 use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::entities::{
-    AgentInteraction, Column, ColumnProfile, ContractEntityType, ContractResult, ContractStatus,
-    ContractType, DataContract, DataSource, DataSourceType, Document, DocumentChunk,
-    DocumentSourceType, EntityLink, EvidenceOutcome, EvidenceRecord, EvidenceSource, LineageEdge,
-    LineageNodeType, LineageSource, LinkedEntityType, LinkMethod, Metric, MetricType, QueryType,
-    Schema, SemanticDefinition, SemanticEntityType, DefinitionSource, Table, TableCluster,
-    TableClusterMember, TableType, UsageRecord,
+    AgentInteraction, Column, ColumnProfile, DataContract, DataSource, Document, DocumentChunk, EntityLink, EvidenceOutcome, EvidenceRecord, EvidenceSource, LineageEdge, Metric,
+    Schema, SemanticDefinition, Table, TableCluster,
+    TableClusterMember, UsageRecord,
 };
 
 use super::MetadataStore;
@@ -137,6 +133,7 @@ fn row_to_column(row: &sqlx::sqlite::SqliteRow) -> Result<Column> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_column_profile(row: &sqlx::sqlite::SqliteRow) -> Result<ColumnProfile> {
     let id: String = row.try_get("id")?;
     let column_id: String = row.try_get("column_id")?;
@@ -280,6 +277,7 @@ fn row_to_document_chunk(row: &sqlx::sqlite::SqliteRow) -> Result<DocumentChunk>
     })
 }
 
+#[allow(dead_code)]
 fn row_to_entity_link(row: &sqlx::sqlite::SqliteRow) -> Result<EntityLink> {
     let id: String = row.try_get("id")?;
     let chunk_id: String = row.try_get("chunk_id")?;
@@ -297,6 +295,7 @@ fn row_to_entity_link(row: &sqlx::sqlite::SqliteRow) -> Result<EntityLink> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_usage_record(row: &sqlx::sqlite::SqliteRow) -> Result<UsageRecord> {
     let id: String = row.try_get("id")?;
     let table_id: String = row.try_get("table_id")?;
@@ -315,6 +314,7 @@ fn row_to_usage_record(row: &sqlx::sqlite::SqliteRow) -> Result<UsageRecord> {
     })
 }
 
+#[allow(dead_code)]
 fn row_to_agent_interaction(row: &sqlx::sqlite::SqliteRow) -> Result<AgentInteraction> {
     let id: String = row.try_get("id")?;
     let input: String = row.try_get("input")?;
@@ -591,7 +591,7 @@ impl MetadataStore for SqliteStore {
     // --- SemanticDefinition ---
 
     async fn upsert_semantic_definition(&self, def: &SemanticDefinition) -> Result<()> {
-        let embedding = def.embedding.as_ref().map(|e| json_str(e)).transpose()?;
+        let embedding = def.embedding.as_ref().map(json_str).transpose()?;
         sqlx::query(
             r#"
             INSERT INTO semantic_definitions (
@@ -1010,7 +1010,7 @@ impl MetadataStore for SqliteStore {
     // --- DocumentChunk ---
 
     async fn upsert_chunk(&self, chunk: &DocumentChunk) -> Result<()> {
-        let embedding = chunk.embedding.as_ref().map(|e| json_str(e)).transpose()?;
+        let embedding = chunk.embedding.as_ref().map(json_str).transpose()?;
         sqlx::query(
             r#"
             INSERT INTO document_chunks (
@@ -1185,9 +1185,9 @@ impl MetadataStore for SqliteStore {
                 entity_id: entity_str.parse()?,
                 interaction_id: interaction_str.map(|s| s.parse()).transpose()?,
                 query_text: row.get("query_text"),
-                outcome: EvidenceOutcome::from_str(&outcome_str)
+                outcome: EvidenceOutcome::parse(&outcome_str)
                     .ok_or_else(|| anyhow::anyhow!("invalid outcome: {outcome_str}"))?,
-                source: EvidenceSource::from_str(&source_str)
+                source: EvidenceSource::parse(&source_str)
                     .ok_or_else(|| anyhow::anyhow!("invalid source: {source_str}"))?,
                 confidence_delta: row.get("confidence_delta"),
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_str)?.with_timezone(&chrono::Utc),
@@ -1329,9 +1329,9 @@ impl MetadataStore for SqliteStore {
                 entity_id: entity_str.parse()?,
                 interaction_id: interaction_str.map(|s| s.parse()).transpose()?,
                 query_text: row.get("query_text"),
-                outcome: EvidenceOutcome::from_str(&outcome_str)
+                outcome: EvidenceOutcome::parse(&outcome_str)
                     .ok_or_else(|| anyhow::anyhow!("invalid outcome: {outcome_str}"))?,
-                source: EvidenceSource::from_str(&source_str)
+                source: EvidenceSource::parse(&source_str)
                     .ok_or_else(|| anyhow::anyhow!("invalid source: {source_str}"))?,
                 confidence_delta: row.get("confidence_delta"),
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_str)?.with_timezone(&chrono::Utc),
@@ -1349,7 +1349,8 @@ impl MetadataStore for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{DataSourceType, TableType};
+    use chrono::{DateTime, Utc};
+    use crate::entities::{DataSourceType, DefinitionSource, SemanticEntityType, TableType};
 
     async fn test_store() -> SqliteStore {
         SqliteStore::open("sqlite::memory:").await.unwrap()

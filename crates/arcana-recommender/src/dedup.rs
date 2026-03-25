@@ -1,7 +1,7 @@
 use anyhow::Result;
 use arcana_core::{
     embeddings::VectorIndex,
-    entities::{SemanticEntityType, Table, TableCluster, TableClusterMember},
+    entities::{SemanticEntityType, Table},
     store::MetadataStore,
 };
 use std::collections::{HashMap, HashSet};
@@ -84,7 +84,7 @@ pub async fn find_clusters(
 
     // Build DedupCluster for each group with 2+ members
     let mut results = Vec::new();
-    for (_root, member_ids) in &clusters {
+    for member_ids in clusters.values() {
         if member_ids.len() < 2 { continue; }
 
         let mut tables_with_sim: Vec<(Table, f64)> = Vec::new();
